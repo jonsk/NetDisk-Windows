@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    LoopbackLoginCheck —— 回环回调 + PKCE 的**行为检查器**(DE-D-03)。
+
+    与 NameRulesCheck 同形(零 NuGet 依赖的控制台门禁,不进 NetDisk.sln):
+    登录流程的正确性靠"真的起一个监听 + 真的发一个 HTTP 回调"来验证,
+    而不是靠断言内部字段。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>LoopbackLoginCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+  </ItemGroup>
+</Project>
