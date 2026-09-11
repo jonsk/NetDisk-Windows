@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "名字校验的**共享夹具**(DE-D-02 ③):同一批用例在服务端(Go,internal/namepolicy)",
+    "与客户端(C#,NetDisk.ClientCore.NameRules)各跑一遍,断言结论一致。",
+    "权威是**服务端**:客户端这份是镜像,任何不一致都必须改客户端。",
+    "为什么必须双端同批跑:客户端要在上传**之前**就拒掉非法名(否则用户体验是",
+    "'传到 99% 才报错'),而规则一旦漂移,用户会遇到'客户端说没问题、服务端拒绝'",
+    "这类无法解释的失败 —— 而它只在特定名字上出现,靠人肉比对永远查不全。"
+  ],
+  "cases": [
+    { "name": "a.txt",                  "valid": true,  "note": "普通名" },
+    { "name": "报告 2026.xlsx",          "valid": true,  "note": "中文 + 中间空格" },
+    { "name": "my report v1.2.xlsx",     "valid": true,  "note": "多段后缀 + 空格" },
+    { "name": "a. b.txt",                "valid": true,  "note": "点后跟空格但不在结尾" },
+    { "name": "con_1.txt",               "valid": true,  "note": "保留名 + 下划线前缀(不是保留名)" },
+    { "name": "CONS",                    "valid": true,  "note": "保留名的前缀但本身不是" },
+    { "name": "CONSOLE.txt",             "valid": true,  "note": "同上" },
+    { "name": "COM10",                   "valid": true,  "note": "COM 后两位数字不算保留名" },
+    { "name": "LPT0",                    "valid": true,  "note": "LPT0 不是保留名" },
+    { "name": "nulll.txt",               "valid": true,  "note": "NUL 的近似词" },
+    { "name": ".gitignore",              "valid": true,  "note": "前导点(不是结尾点)" },
+
+    { "name": "report.",                 "valid": false, "note": "结尾点(Windows 会静默吃掉)" },
+    { "name": "report ",                 "valid": false, "note": "结尾空格(同上)" },
+    { "name": "report. ",                "valid": false, "note": "结尾点 + 空格" },
+    { "name": "报告 .",                   "valid": false, "note": "中文名的结尾点" },
+    { "name": ".",                       "valid": false, "note": "单点" },
+    { "name": "..",                      "valid": false, "note": "双点" },
+    { "name": " ",                       "valid": false, "note": "纯空白" },
+
+    { "name": "CON",                     "valid": false, "note": "Windows 保留名" },
+    { "name": "con",                     "valid": false, "note": "保留名大小写不敏感" },
+    { "name": "nul.txt",                 "valid": false, "note": "保留名带后缀" },
+    { "name": "COM1",                    "valid": false, "note": "COM1-9" },
+    { "name": "com9.log",                "valid": false, "note": "小写 + 后缀" },
+    { "name": "LPT1",                    "valid": false, "note": "LPT1-9" },
+    { "name": "aux",                     "valid": false, "note": "AUX" },
+    { "name": "PRN.txt",                 "valid": false, "note": "PRN 带后缀" },
+
+    { "name": "a/b.txt",                 "valid": false, "note": "路径分隔符 /" },
+    { "name": "a\\b.txt",                "valid": false, "note": "路径分隔符 \\" },
+    { "name": "a:b.txt",                 "valid": false, "note": "冒号(Windows 备用数据流)" },
+    { "name": "a*b.txt",                 "valid": false, "note": "通配符" },
+    { "name": "a?b.txt",                 "valid": false, "note": "通配符" },
+    { "name": "a<b>c.txt",               "valid": false, "note": "重定向字符" },
+    { "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+                                          "valid": false, "note": "超过 240 字节(单名上限,R-11)" }
+  ]
+}

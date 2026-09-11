@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    NameRulesCheck —— **双端名字规则一致性检查器**(DE-D-02 ③)。
+
+    它刻意是一个**控制台检查器**而不是 xunit 测试工程:
+      ① 零 NuGet 依赖(只用 BCL),因此在任何机器/CI 上都能跑,不会因为
+         "测试框架包拉不下来"而让这条纪律失效;
+      ② 与仓库里已有的门禁同形(Go 侧是 `go run ./cmd/depsguard`,这里用
+         `dotnet run` 指向 desktop/tests/NameRulesCheck),失败即非 0 退出码。
+
+    本工程**不加入 NetDisk.sln**:solution 里的 5 个工程是**交付物**,
+    这是校验工具(与 server/cmd/depsguard 同类)。混进 solution 会让
+    "5 个工程"这条验收标准失去意义,也会让 MSI/发布流程意外带上它。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NetDisk.Tools.NameRulesCheck</RootNamespace>
+    <AssemblyName>NameRulesCheck</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+  </ItemGroup>
+
+</Project>
