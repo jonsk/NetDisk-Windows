@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    NetDisk.SyncEngine —— 同步状态机/watcher/游标/冲突(DE-D-08~13)。
+
+    框架是 `net10.0-windows`:**这里允许(且必要时必须)用 Windows 能力** ——
+    FileSystemWatcher(8.3 秒级感知)、FileIdInfo(识别 rename,DE-D-11)、
+    长路径归一化(DE-D-16)。按 7.7 的纪律,这些 P/Invoke 只准落在本工程。
+
+    依赖方向(App → SyncEngine/Transport → ClientCore)由 depsguard 静态校验:
+    本工程**不得**引用 NetDisk.App(反向依赖会让内核无法被单测/被将来复用)。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.SyncEngine</RootNamespace>
+    <AssemblyName>NetDisk.SyncEngine</AssemblyName>
+    <!-- 本工程会用到 P/Invoke,但**不开** UseWPF:WPF 只属于 App -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\NetDisk.Transport\NetDisk.Transport.csproj" />
+  </ItemGroup>
+
+</Project>

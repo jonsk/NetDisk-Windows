@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    NetDisk.Transport —— REST/WebDAV/TUS 客户端(DE-D-05/06 落地,这里先立骨架)。
+
+    框架是 `net10.0`(**不带 -windows**):HTTP 客户端不该依赖 Windows;
+    一旦带上后缀,就等于给"Transport 里写 Windows 专属代码"开了口子,
+    而这层是将来最可能被复用的部分(7.7 A-10 的 TUS 客户端)。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NetDisk.Transport</RootNamespace>
+    <AssemblyName>NetDisk.Transport</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,24 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+
+  <!--
+    NetDisk.Setup —— WiX MSI(R-25:工具版本、扩展、SDK **三处都钉 6.0.2**;
+    禁止 `dotnet tool update` 全局升级 wix)。
+
+    R-26 的 perUser + MajorUpgrade 在 Product.wxs 里;完整签名/updater 接线见
+    DE-D-20 与 `Doc/WiX-配置指南.md`。
+
+    本工程在 DE-D-01 只求"能被 solution build 编出来"(证明工具链就位),
+    MSI 的真实文件清单要等 App 有可发布产物后才生成。
+  -->
+  <PropertyGroup>
+    <OutputName>NetDisk</OutputName>
+    <OutputType>Package</OutputType>
+    <!-- 版本与 App 一致(ADR-3:桌面制品版本独立递增,不随仓库 tag) -->
+    <DefineConstants>ProductVersion=1.0.0</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
+  </ItemGroup>
+
+</Project>

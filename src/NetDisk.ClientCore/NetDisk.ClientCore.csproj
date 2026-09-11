@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    NetDisk.ClientCore —— **平台无关的客户端内核**(DE-D-02 / ADR-4)。
+
+    硬纪律(CI 静态校验,见 server/cmd/depsguard):
+      ①**零 WPF**:不引用 PresentationFramework/PresentationCore 等;
+      ②**零 Windows API**:不 DllImport、不引用 System.Runtime.InteropServices
+        里的 Windows 专属类型(注册表/事件日志/文件 ID 等都归 SyncEngine);
+      ③**只依赖 BCL**:因此 TargetFramework 是 `net10.0`(不带 `-windows` 后缀)。
+
+    为什么这条纪律值得用 CI 去盯:它被破坏的方式极其自然 ——
+    "顺手"在这里写一个 `Path.GetFullPath` 之外的 Windows 专属调用(长路径、
+    文件 ID、DPAPI)就破了。破坏后**编译照样通过**,代价要等到"想给这个内核
+    写单测/换宿主/拆仓"时才显现,而那时已经晚了(全部逻辑都和 Windows 绑死了)。
+
+    长路径归一化、FileIdInfo 识别 rename、DPAPI 令牌存储这些**必须**用
+    Windows 能力的东西,一律放 NetDisk.SyncEngine / NetDisk.App。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NetDisk.ClientCore</RootNamespace>
+    <AssemblyName>NetDisk.ClientCore</AssemblyName>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

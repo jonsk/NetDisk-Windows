@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  NetDisk 客户端 MSI(骨架;完整文件清单/签名/updater 接线见 DE-D-20)。
+
+  R-26 两条硬要求(这里就先立住,免得 DE-D-20 才发现要改结构):
+    ① **perUser**:`Scope="perUser"` —— 普通用户没有管理员权限也能装(企业里
+       批量分发时"要求提权"是最常见的落地阻力);
+    ② **MajorUpgrade**:升级用 MajorUpgrade 而不是自己写 RemoveExistingProducts
+       的顺序 —— 后者的顺序错了会**先删旧版再装新版**,中途失败就是"两个版本
+       都没有";MajorUpgrade 由 WiX 生成正确的执行序列。
+
+  DE-D-01 的验证目标是"这个工程能被 dotnet build 编出来"(证明 WiX 6.0.2 工具链
+  在 solution 里就位),因此这里**故意不含任何文件载荷** —— 载荷清单要等 App 有
+  可发布的产物(否则会写一份永远对不上的清单)。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="NetDisk"
+           Manufacturer="netdisk"
+           Version="$(ProductVersion)"
+           UpgradeCode="7C0B9E52-1C4A-4F2E-9D3B-6A5E8F1D2C34"
+           Scope="perUser"
+           Compressed="yes"
+           Codepage="65001">
+
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的 NetDisk,请先卸载。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="NetDisk" />
+    </StandardDirectory>
+
+    <!--
+      DE-D-01 的唯一载荷(占位说明文件);DE-D-20 用 App 的真实发布产物替换。
+      现在就放一个真实文件的理由:空 MSI 会在 ICE 校验阶段失败
+      (ICE71 无 Media 条目 / ICE64 perUser 目录未登记 RemoveFile),
+      而 ICE 校验是我们想保留的门禁 —— 为了"编得过"去关掉校验,
+      等于把"卸载残留"这类问题留到用户机器上。
+    -->
+    <ComponentGroup Id="PlaceholderPayload" Directory="INSTALLFOLDER">
+      <!--
+        Guid 必须**显式写死**(不能用 `*`):WIX0230 —— 同时含"文件"与
+        "注册表 KeyPath"的组件不满足自动生成 GUID 的条件。显式 GUID 在这里
+        也是正确的:组件标识必须跨版本稳定,升级(MajorUpgrade)才认得出
+        "这是同一个组件的新版本"。占位组件在 DE-D-20 被真实组件替换时会一并调整。
+      -->
+      <Component Id="ReadmeComponent" Guid="6E1D0C6A-2B7F-4C9E-8A31-5F4D2B7E9C10">
+        <File Id="ReadmeFile" Source="Payload\README.txt" />
+        <!--
+          perUser 组件的 KeyPath **必须是 HKCU 下的注册表值**(ICE38):
+          没有管理员权限的安装不能拿"用户配置目录里的文件"当 KeyPath 依据 ——
+          卸载/修复时凭它判断"组件是否已安装"会失效。这也是 perUser 安装
+          区别于 perMachine 的关键一处(DE-D-20 的真实组件同样要遵守)。
+        -->
+        <RegistryValue Root="HKCU" Key="Software\netdisk\NetDisk"
+                       Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        <!-- perUser 安装目录必须在卸载时移除(ICE64 的要求,也是"卸载干净"的要求) -->
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="MainFeature" Title="NetDisk" Level="1">
+      <ComponentGroupRef Id="PlaceholderPayload" />
+    </Feature>
+  </Package>
+</Wix>

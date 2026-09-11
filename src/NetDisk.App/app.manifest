@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <!--
+    App 清单(DE-D-01)。
+
+    两个必要性:
+      1. **perMonitorV2 DPI 感知**:WPF 在高 DPI 屏上默认会被系统拉伸(模糊),
+         而资源管理器风格的客户端必须清晰;
+      2. **longPathAware**:Windows 10 1607+ 的长路径支持需要进程清单声明,
+         否则超过 MAX_PATH 的路径一律失败 —— 而 R-11 允许 240 字节的**单名**
+         上限,组合起来很容易超过 260(DE-D-16 专门处理长路径,这里是前提)。
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2</dpiAwareness>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>

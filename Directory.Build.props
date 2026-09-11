@@ -1,0 +1,25 @@
+<Project>
+  <!--
+    桌面端共享构建设置(DE-D-01)。
+
+    为什么用 Directory.Build.props 而不是每个 csproj 抄一遍:
+    "全工程一致的开关"(可空引用、语言版本、警告即错误)一旦分散在 5 个文件里,
+    新增工程时必然漏掉一个 —— 而漏掉的那个会以"只有它编译得过"的形式出现
+    (例如某个工程忘了开可空引用,于是 NRT 警告全被吞掉)。
+
+    注意:**不放 TargetFramework** —— 各工程的框架是按纪律不同的
+    (ClientCore/Transport 是 `net10.0` 平台无关;SyncEngine/App 是 `net10.0-windows`),
+    放这里等于把"平台无关"这条纪律用一个共享开关抹掉。
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- 版本按 ADR-3:桌面制品版本不随仓库 tag,用 +server.x.y.z 语义化后缀独立递增 -->
+    <Version>1.0.0</Version>
+    <InformationalVersion>1.0.0+server.1.0.0</InformationalVersion>
+    <Company>netdisk</Company>
+    <Product>NetDisk</Product>
+  </PropertyGroup>
+</Project>

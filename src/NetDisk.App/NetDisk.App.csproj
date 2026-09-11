@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    NetDisk.App —— WPF UI(唯一允许 UseWPF 的工程;Setup 是打包工程,不算)。
+
+    `net10.0-windows` + `UseWPF=true`(E-05 已实测:`dotnet build -c Release`
+    0 警告 0 错误)。MVVM;所有平台无关逻辑都在 ClientCore/SyncEngine/Transport,
+    本工程只做"把状态画出来 + 把用户动作转成用例调用"。
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>NetDisk.App</RootNamespace>
+    <AssemblyName>NetDisk.App</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>

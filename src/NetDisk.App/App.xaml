@@ -1,0 +1,8 @@
+<Application x:Class="NetDisk.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+  <Application.Resources>
+    <!-- 资源集中在此;MVVM 的 ViewModel 定位见 DE-D-15 首次运行向导 -->
+  </Application.Resources>
+</Application>

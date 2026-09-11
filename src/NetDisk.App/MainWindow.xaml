@@ -1,0 +1,15 @@
+<Window x:Class="NetDisk.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="NetDisk" Height="480" Width="760"
+        WindowStartupLocation="CenterScreen">
+  <Grid Margin="16">
+    <StackPanel>
+      <TextBlock FontSize="18" FontWeight="SemiBold" Text="NetDisk 桌面端" />
+      <TextBlock Margin="0,8,0,0" TextWrapping="Wrap"
+                 Text="骨架版本(DE-D-01):登录、同步引擎、传输队列与托盘在后续任务中接入。" />
+      <TextBlock Margin="0,8,0,0" Foreground="#666"
+                 Text="本窗口只做占位 —— 平台无关逻辑在 NetDisk.ClientCore / SyncEngine / Transport。" />
+    </StackPanel>
+  </Grid>
+</Window>
