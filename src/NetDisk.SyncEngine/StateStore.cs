@@ -119,6 +119,14 @@ CREATE TABLE IF NOT EXISTS cursors (
         new Migration(2, "sync-state-pending-and-backoff", @"
 ALTER TABLE sync_state ADD COLUMN pending_remote_gone INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sync_state ADD COLUMN retry_after_utc TEXT NOT NULL DEFAULT '';"),
+        // v3:把"期望变更账本"(DE-D-10)落库所需的两个判据列补上 —— 大小 + mtime。
+        // 为什么现在才加:内存账本已经能满足"不产生回环",但**跨进程重启**不够 ——
+        // 进程在"登记意图"与"事件到达"之间崩溃时,重启后 watcher 可能补发那次事件,
+        // 没有落库就会变成一次凭空的多余上传(幂等、不丢数据,但用户会看到"我没改它却在传")。
+        // DE-D-14 的传输队列带来了"跨重启在飞任务"的真实需求,所以在这里一起接上。
+        new Migration(3, "expected-changes-size-and-mtime", @"
+ALTER TABLE expected_changes ADD COLUMN expected_size INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE expected_changes ADD COLUMN expected_mtime_ticks INTEGER NOT NULL DEFAULT 0;"),
     };
 
     private StateStore(SqliteConnection conn, int schemaVersion, bool newerThanCode)

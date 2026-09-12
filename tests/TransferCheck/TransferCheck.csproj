@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    TransferCheck —— DE-D-14 检查器(零额外 NuGet)。
+    ①并发默认 3 且**真的封顶**、可配;②上下行**分别**限速且不限速时零等待;
+    ③**最小化后继续传** = 传输不得依赖 UI 调度器(用一个"永不派发"的
+      SynchronizationContext 复现:实现里任何一步把续体排到 UI 上都会挂住);
+    ④单任务失败不拖垮队列;⑤账本落库(DE-D-10 遗留缺口)读写与跨重启销账。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Transfer</RootNamespace>
+    <AssemblyName>TransferCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>

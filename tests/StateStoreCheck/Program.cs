@@ -22,7 +22,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑥ 迁移失败不写版本号(不留下半截 schema)", CheckFailedMigrationKeepsVersionAsync),
     ("⑦ WAL + busy_timeout + foreign_keys 已生效", CheckPragmasAsync),
     ("⑧ 重复打开是幂等的(不重建、不清空)", CheckIdempotentOpenAsync),
-    ("⑨ 升到 v2 后新增列可用且旧行取到默认值", CheckNewColumnsAsync),
+    ("⑨ 升级后新增列可用且旧行取到默认值", CheckNewColumnsAsync),
     ("⑩ 两个连接共用同一文件(WAL 下读写不互锁)", CheckConcurrentConnectionsAsync),
 };
 
@@ -117,7 +117,8 @@ static Task CheckRollbackReadAsync()
         var v1Only = StateStore.DefaultMigrations.Where(m => m.Version == 1).ToList();
         using var old = StateStore.Open(path, v1Only);
         Assert(old.SchemaNewerThanCode, "旧版代码应当知道自己打开的是更新的库");
-        Assert(old.SchemaVersion == 2, $"库的版本仍是 2(v1 代码不改它),实际 v{old.SchemaVersion}");
+        Assert(old.SchemaVersion == StateStore.LatestVersionOf(StateStore.DefaultMigrations),
+            $"库的版本仍是当前最新(v1 代码只读、不改它),实际 v{old.SchemaVersion}");
         var version = Convert.ToInt64(old.Scalar(
             "SELECT remote_version FROM sync_state WHERE file_id = $f", ("$f", "f2")));
         Assert(version == 3L, $"回退后仍应读到数据,实际 remote_version={version}");
@@ -130,15 +131,15 @@ static Task CheckNewerSchemaDetectedAsync()
     WithTempDb(path =>
     {
         var withV3 = StateStore.DefaultMigrations
-            .Append(new Migration(3, "future-client", "ALTER TABLE sync_state ADD COLUMN future_flag INTEGER NOT NULL DEFAULT 0;"))
+            .Append(new Migration(99, "future-client", "ALTER TABLE sync_state ADD COLUMN future_flag INTEGER NOT NULL DEFAULT 0;"))
             .ToList();
         using (var future = StateStore.Open(path, withV3))
         {
-            Assert(future.SchemaVersion == 3, $"应到 v3,实际 v{future.SchemaVersion}");
+            Assert(future.SchemaVersion == 99, $"应到 v99,实际 v{future.SchemaVersion}");
         }
 
         using var current = StateStore.Open(path); // 当前代码只到 v2
-        Assert(current.SchemaVersion == 3, "库的版本号是库的事实(v3)");
+        Assert(current.SchemaVersion == 99, "库的版本号是库的事实(由更新版本客户端写的 v99)");
         Assert(current.SchemaNewerThanCode, "当前代码必须识别出「库比代码新」");
         // 仍然可用:按显式列名读自己认识的列
         current.Execute("INSERT INTO sync_state (file_id, space_id, local_path) VALUES ($f,$s,$p)",
@@ -190,7 +191,7 @@ static Task CheckFailedMigrationKeepsVersionAsync()
 
         // 一条"先建表、再执行非法 SQL"的迁移:失败后**必须整体回滚**(表与版本号都不留)
         var broken = StateStore.DefaultMigrations
-            .Append(new Migration(3, "broken",
+            .Append(new Migration(99, "broken",
                 "CREATE TABLE half_built (id INTEGER PRIMARY KEY);\nSELECT * FROM no_such_table;"))
             .ToList();
         var threw = false;
@@ -205,7 +206,8 @@ static Task CheckFailedMigrationKeepsVersionAsync()
         Assert(threw, "迁移失败应当抛出,而不是留下半截 schema");
 
         using var after = StateStore.Open(path); // 回到 v2
-        Assert(after.SchemaVersion == 2, $"失败之后版本必须仍是 v2,实际 v{after.SchemaVersion}");
+        Assert(after.SchemaVersion == StateStore.LatestVersionOf(StateStore.DefaultMigrations),
+            $"失败之后版本必须仍是最新(v99 那条被回滚),实际 v{after.SchemaVersion}");
         Assert(!TableExists(after, "half_built"), "失败迁移里建的表必须被回滚掉");
         Assert(Convert.ToString(after.Scalar("SELECT file_id FROM sync_state LIMIT 1")) == "keep",
             "失败迁移不能影响原有数据");
@@ -239,7 +241,7 @@ static Task CheckIdempotentOpenAsync()
         }
         using (var b = StateStore.Open(path))
         {
-            Assert(b.SchemaVersion == 2, "第二次打开不该改变版本");
+            Assert(b.SchemaVersion == StateStore.LatestVersionOf(StateStore.DefaultMigrations), "第二次打开不该改变版本");
             Assert(Convert.ToInt64(b.Scalar("SELECT count(*) FROM sync_state")) == first,
                 "第二次打开不该重建/清空数据");
         }
