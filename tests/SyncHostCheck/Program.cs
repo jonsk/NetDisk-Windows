@@ -67,6 +67,24 @@ try
     await session.SignInAsync(user, pass!);
     Check("账密登录成功", session.IsSignedIn);
 
+    // 可选:把登录后的**令牌密文**导出到指定路径。
+    // 用途:验证真实客户端(App)的接线 —— App 的启动路径之一是"用已保存的令牌直接开跑",
+    // 而它读的是 %APPDATA%\NetDisk\tokens.bin。DPAPI 按**当前用户**加密,所以同一用户下
+    // 把这份文件放到那个路径就能被 App 解密,从而无需人手输入口令即可验证整条 UI 链路。
+    var tokenOut = Environment.GetEnvironmentVariable("NETDISK_E2E_TOKEN_OUT");
+    if (!string.IsNullOrWhiteSpace(tokenOut))
+    {
+        if (File.Exists(tokenPath))
+        {
+            File.Copy(tokenPath, tokenOut, overwrite: true);
+            Console.WriteLine($"    已导出令牌密文 → {tokenOut}");
+        }
+        else
+        {
+            Console.WriteLine($"    ⚠ 未找到令牌密文 {tokenPath}(导出跳过)");
+        }
+    }
+
     var api = new ApiClient(new ClientOptions { BaseAddress = new Uri(baseUrl) }, tokens: session);
     var files = new FileApi(api);
     var spaces = await files.ListSpacesAsync();
@@ -85,6 +103,19 @@ try
     cfg.Save();
     var reloaded = ClientConfig.Load(cfgPath);
     Check("配置能落盘并读回(原子写)", reloaded.BaseUrl == baseUrl && reloaded.SyncRoot == root);
+
+    // ①b **用已保存的令牌**启动(= 真实客户端开机自动同步走的那条路)。
+    // 这条路径特别值得单独测:它没有登录那一步,所以"令牌没落盘/落盘了读不回来/
+    // 读回来了却没注入 ApiClient"全都只会表现为"启动后什么都没发生" ——
+    // 界面上与"服务器上没有文件"完全一样。实测 App 第一次跑就是靠它才连上的。
+    {
+        var auto = SyncRuntime.FromStoredToken(ClientConfig.Load(cfgPath), tokenPath: tokenPath);
+        var autoStarted = await auto.StartAsync();
+        Check("用已保存令牌启动同步(自动启动路径)", autoStarted);
+        Check("启动过程留了可补看的进展历史", auto.RecentNotices.Count > 0,
+            $"notices={auto.RecentNotices.Count}");
+        await auto.DisposeAsync();
+    }
 
     var remoteNames = new HashSet<string>(StringComparer.Ordinal);
 
