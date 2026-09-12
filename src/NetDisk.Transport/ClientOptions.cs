@@ -26,8 +26,15 @@ public sealed class ClientOptions
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
 }
 
-/// <summary>令牌对(access + refresh),由登录流程产出、由 DPAPI 存储(DE-D-04)。</summary>
-public sealed record TokenPair
+/// <summary>
+/// 令牌集合(access + refresh + **绝对**过期时刻),由登录流程产出、由 DPAPI 存储(DE-D-04)。
+///
+/// 名字刻意不叫 `TokenPair`:契约生成物(`ClientCore.Generated.Models.g.cs`)里已经有一个
+/// `TokenPair`,那是**线上的形状**(`expires_in` 是相对秒数)。两者同名会让"TokenPair 到底
+/// 带不带绝对时刻"在不同文件里有不同答案 —— 而相对量落盘正是本项目反复踩到的坑
+/// (见 AuthApi 里 expires_in → 绝对时刻的注释;同名冲突在首次编译时以 CS0738 的形式炸出来)。
+/// </summary>
+public sealed record TokenSet
 {
     public required string AccessToken { get; init; }
     public required string RefreshToken { get; init; }

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    TokenSessionCheck —— DE-D-04 的行为检查器(零 NuGet 依赖,与 NameRules/LoopbackLogin
+    两个检查器同形:失败非 0 退出,可直接进 CI)。
+
+    为什么不用 xunit:①这一批检查器的作用是"纪律/行为门禁",而门禁不该因为"测试框架
+    包拉不下来"而失效(本项目已经因为 TLS 拉不到 runtime 包而放弃过自包含发布);
+    ②它们要**真的**碰 DPAPI、真的起 HttpMessageHandler 桩,不需要测试框架的夹具。
+
+    引用 SyncEngine 是刻意的:DPAPI 存储与会话都在那里(Windows 能力只准落在 SyncEngine/App)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.TokenSession</RootNamespace>
+    <AssemblyName>TokenSessionCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
