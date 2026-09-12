@@ -23,4 +23,14 @@
     <ProjectReference Include="..\NetDisk.Transport\NetDisk.Transport.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      本地状态库(DE-D-07)。这是**桌面端唯一的 NuGet 依赖**,放在 SyncEngine 而不是
+      ClientCore/Transport:那两层的纪律是"平台无关 + 零 NuGet"(ADR-4),而 SQLite 是
+      本地状态库这个具体需求带来的实现选择,并且它必须落在能用本机能力的这一层。
+      版本与目标框架同大版本(10.x ↔ net10.0),避免"运行时与 SDK 各说各话"。
+    -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+  </ItemGroup>
+
 </Project>
