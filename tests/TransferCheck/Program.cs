@@ -43,6 +43,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑨ 进度按阈值节流(不是每片都上报)", CheckProgressThrottledAsync),
     ("⑩ 账本落库:Save/Load 往返(真实 SQLite)且同路径不重复", CheckLedgerPersistenceAsync),
     ("⑪ 跨重启销账:重启后仍能认出自写事件", CheckLedgerSurvivesRestartAsync),
+    ("⑫ 第一批跑完后再入队仍会被执行(worker 活性)", CheckEnqueueAfterDrainStillRunsAsync),
 };
 
 var failed = 0;
@@ -393,8 +394,51 @@ static Task CheckLedgerSurvivesRestartAsync()
     return Task.CompletedTask;
 }
 
-// ---------------------------------------------------------------- 工具
+// 回归(真实事故,2026-09):第一批任务跑完后队列**静默失效**,第二批一个都不执行。
+//
+// 成因:EnsureWorkers 用 `_workers.Count` 判断"还要不要补工作线程",而退出的工作线程
+// **不会从 _workers 里移除**,于是它长期 ≥ 上限 → 永远不再补人 → 新入队的任务没人取。
+// 现场表现极具误导性:同步日志停在「对账:排空队列超时(待处理=1 在跑=0)」,
+// 文件明明在本地却永远传不上去;而单批次的并发用例完全看不出问题(它们在 drain 之前
+// 就把任务全塞进去了,第一批刚好把 _workers 撑到上限)。
+//
+// 所以这条用例的**关键**是:每批都 drain 一次,让工作线程自然退出(队列空即退出),
+// 第二批才落在"没有活 worker"的时刻 —— 修复前这条必然挂住/失败。
+static async Task CheckEnqueueAfterDrainStillRunsAsync()
+{
+    await using var q = new TransferQueue(new TransferQueueOptions { MaxConcurrency = 3 });
+    var ran = 0;
 
+    for (var round = 1; round <= 3; round++)
+    {
+        for (var i = 0; i < 4; i++)
+        {
+            q.Enqueue(new TransferJob
+            {
+                Id = $"batch{round}-{i}",
+                DisplayName = $"f{i}.bin",
+                Direction = TransferDirection.Upload,
+                TotalBytes = 10,
+                Run = async (_, ct) =>
+                {
+                    await Task.Delay(5, ct);
+                    Interlocked.Increment(ref ran);
+                    return 10;
+                },
+            });
+        }
+
+        var drain = q.DrainAsync();
+        var winner = await Task.WhenAny(drain, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert(winner == drain,
+            $"第 {round} 批任务没能跑空 —— 队列在第一批之后不再派发新任务(工作线程活性判断失效)");
+        await drain;
+    }
+
+    Assert(ran == 12, $"三批共 12 个任务都必须执行,实际 {ran} —— 少执行说明有批次被静默丢掉");
+}
+
+// ---------------------------------------------------------------- 工具
 static void Assert(bool condition, string message)
 {
     if (!condition)

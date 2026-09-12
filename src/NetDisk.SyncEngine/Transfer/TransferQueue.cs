@@ -71,6 +71,10 @@ public sealed class TransferQueue : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly List<Task> _workers = new();
     private int _active;
+    // 存活工作线程数:**必须在工作线程退出时递减**,否则 _workers 里堆的是"已经死了的任务",
+    // EnsureWorkers 会以为还有人在干活,于是新入队的任务永远没人取 ——
+    // 表现就是"第一批传完之后队列静默失效"(实测:待处理=1 在跑=0,永远不动)。
+    private int _liveWorkers;
 
     public TransferQueue(TransferQueueOptions? options = null, TimeProvider? clock = null)
     {
@@ -124,8 +128,10 @@ public sealed class TransferQueue : IAsyncDisposable
         lock (_workers)
         {
             var wanted = Math.Min(_options.MaxConcurrency, Math.Max(1, _pending.Count));
-            while (_workers.Count < wanted)
+            while (Volatile.Read(ref _liveWorkers) < wanted)
             {
+                // 先加计数再启线程:线程体内 finally 会递减,保证计数与实际存活一致
+                Interlocked.Increment(ref _liveWorkers);
                 // Task.Run:工作线程跑在线程池上 —— 即使 UI 线程被挂起/最小化,
                 // 传输也照常推进(验收"最小化后继续传")
                 _workers.Add(Task.Run(() => WorkerLoopAsync(_shutdown.Token)));
@@ -135,11 +141,13 @@ public sealed class TransferQueue : IAsyncDisposable
 
     private async Task WorkerLoopAsync(CancellationToken ct)
     {
+        try
+        {
         while (!ct.IsCancellationRequested)
         {
             if (!_pending.TryDequeue(out var job))
             {
-                return; // 没活了就退出;下一次 Enqueue 会再拉起工作线程
+                return; // 没活了就退出;下一次 Enqueue 会再拉起工作线程(靠 _liveWorkers 判断)
             }
 
             await _slots.WaitAsync(ct).ConfigureAwait(false);
@@ -157,6 +165,11 @@ public sealed class TransferQueue : IAsyncDisposable
                 Interlocked.Decrement(ref _active);
                 _slots.Release();
             }
+        }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _liveWorkers);
         }
     }
 
