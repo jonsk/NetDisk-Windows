@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ApiClientCheck —— DE-D-05 的行为检查器(零 NuGet 依赖)。
+
+    断言的是"三个最容易静默出错的地方":base_version 有没有真的注入、
+    409 的 reason 有没有被解析成可执行的动作、以及重试策略有没有把
+    **不该重试的请求**重试掉(POST 重试 = 重复建资源)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NetDisk.Checks.ApiClient</RootNamespace>
+    <AssemblyName>ApiClientCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+  </ItemGroup>
+
+</Project>
