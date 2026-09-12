@@ -193,6 +193,7 @@ public sealed class SyncHost : IAsyncDisposable
             var top = await _files.ListAsync(spaceId, syncParent, ct).ConfigureAwait(false);
             _rootId = top.FirstOrDefault()?.parent_id;
         }
+        Notice?.Invoke("对账:开始列远端…");
         var remote = new Dictionary<string, EntryView>(StringComparer.OrdinalIgnoreCase);
         var parentOf = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
@@ -212,6 +213,7 @@ public sealed class SyncHost : IAsyncDisposable
             Upsert(rel, SyncState.InSync, "", e.version);
         }
 
+        Notice?.Invoke($"对账:远端 {remote.Count} 个文件,进入下载阶段");
         // ① 远端 → 本地
         foreach (var (rel, entry) in remote)
         {
@@ -235,6 +237,7 @@ public sealed class SyncHost : IAsyncDisposable
             }
         }
 
+        Notice?.Invoke("对账:进入本地上传阶段");
         // ② 本地 → 远端(新文件或本地改动)
         foreach (var item in ScanLocal())
         {
@@ -253,7 +256,9 @@ public sealed class SyncHost : IAsyncDisposable
 
         // 传输统一在这里排空:入队是"计划",排空才是"执行完" ——
         // 排空之后状态才是可信的(否则 UI 会看到一堆 Pending 然后瞬间跳 InSync)。
+        Notice?.Invoke("对账:排空队列…");
         await _queue.DrainAsync(ct).ConfigureAwait(false);
+        Notice?.Invoke("对账:完成");
     }
 
     // ---------------------------------------------------------------- 本地
