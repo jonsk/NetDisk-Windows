@@ -10,14 +10,11 @@ namespace NetDisk.App;
 /// <summary>
 /// WPF 应用入口。
 ///
-/// 组合根只做四件事:①**起誓 UI 线程**(DE-D-21:只有 App 知道谁是 UI 线程)、
-/// ②按环境变量开 soak 采样、③建**通知中心**(DE-D-18)、④把它接到**托盘气泡**;退出时释放。
+/// 组合根做五件事:①**起誓 UI 线程**(DE-D-21:只有 App 知道谁是 UI 线程)、
+/// ②按环境变量开 soak 采样、③建**通知中心**(DE-D-18)、④把它接到**托盘气泡**、
+/// ⑤建主窗口(登录页 → 同步页);退出时释放。
 /// 业务逻辑(该不该通知、合并窗口、配额滞回)都在 SyncEngine 的 NotificationCenter 里 ——
-/// 那不是 UI 决策,而是可单测的策略。
-///
-/// 同步引擎/传输队列/登录会话在 DE-D-14/15 已就绪,接入它们属于后续的接线工作;
-/// 这里先把"通知 → 托盘"这条链路立起来(验收:四类通知可触发),
-/// 并把它作为线程纪律的**真实观测点**(后台通知必须 marshal 回 UI 线程)。
+/// 那不是 UI 决策,而是可单测的策略;同步本身在 SyncHost 里,App 只订阅事件。
 /// </summary>
 public partial class App : System.Windows.Application
 {
@@ -25,6 +22,7 @@ public partial class App : System.Windows.Application
     private TrayNotifier? _tray;
     private SoakRecorder? _soak;
     private System.Windows.Threading.DispatcherTimer? _soakStopWatch;
+    private MainWindow? _main;
 
     public NotificationCenter Notifications =>
         _notifications ?? throw new InvalidOperationException("通知中心尚未初始化");
@@ -43,6 +41,12 @@ public partial class App : System.Windows.Application
 
         _notifications = new NotificationCenter();
         _tray = new TrayNotifier(_notifications);
+
+        // 主窗口在 App 里建(而不是 StartupUri),因为托盘/通知必须先于窗口存在:
+        // 否则登录成功后引擎一冲突就没人接住那条通知(用户什么都看不到)。
+        _main = new MainWindow(_notifications);
+        MainWindow = _main;
+        _main.Show();
     }
 
     /// <summary>

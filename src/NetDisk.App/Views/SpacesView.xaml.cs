@@ -20,7 +20,9 @@ namespace NetDisk.App.Views;
 /// <summary>团队空间协作视图(与 H5 同一组接口)。</summary>
 public partial class SpacesView : System.Windows.Controls.UserControl
 {
-    private readonly SpaceCollabClient? _client;
+    // 不是 readonly:登录成功后由主窗口把**带令牌的**客户端注入进来(见 Attach)。
+    // 在此之前它只能靠配置里的基址建一个匿名客户端 —— 那正是"列表永远是空的"的成因。
+    private SpaceCollabClient? _client;
     private SpaceView? _selected;
 
     public SpacesView()
@@ -29,19 +31,31 @@ public partial class SpacesView : System.Windows.Controls.UserControl
         _client = TryCreateClient();
         if (_client is null)
         {
-            Status("未配置服务端地址:设置环境变量 NETDISK_BASE_URL 后重启客户端。");
+            Status("尚未登录:请先在「同步」页填写服务器地址并登录。");
             return;
         }
         _ = ReloadAsync();
     }
 
+    /// <summary>注入一个**已带令牌**的客户端(登录成功后由主窗口调用),并立即重新加载。</summary>
+    public void Attach(ApiClient api)
+    {
+        ArgumentNullException.ThrowIfNull(api);
+        _client = new SpaceCollabClient(api);
+        _ = ReloadAsync();
+    }
+
     /// <summary>
-    /// 组合根(临时):DE-D-15/18 会接管登录会话与配置读取,这里先用环境变量把
-    /// "基址 → ApiClient → SpaceCollabClient"这条链立起来,让视图真的能调通接口。
+    /// 建客户端的兜底路径(未登录时):**先读已保存的配置**(用户在登录页填的地址),
+    /// 再回落到环境变量 NETDISK_BASE_URL(仅为兼容老用法/CI,普通用户装完 MSI 用不到它)。
     /// </summary>
     private static SpaceCollabClient? TryCreateClient()
     {
-        var baseUrl = Environment.GetEnvironmentVariable("NETDISK_BASE_URL");
+        var baseUrl = NetDisk.SyncEngine.Host.ClientConfig.Load().BaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            baseUrl = Environment.GetEnvironmentVariable("NETDISK_BASE_URL");
+        }
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
             return null;

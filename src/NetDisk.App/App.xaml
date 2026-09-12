@@ -1,7 +1,9 @@
 <Application x:Class="NetDisk.App.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- 刻意**不用** StartupUri:主窗口需要一个已经建好的 NotificationCenter(托盘),
+       而 StartupUri 是 WPF 自己 new 窗口,拿不到那个依赖。
+       由 App.OnStartup 显式 new MainWindow(见 App.xaml.cs)。 -->
   <Application.Resources>
     <!-- 资源集中在此;MVVM 的 ViewModel 定位见 DE-D-15 首次运行向导 -->
   </Application.Resources>
