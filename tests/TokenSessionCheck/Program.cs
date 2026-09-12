@@ -239,8 +239,15 @@ static async Task CheckRefreshOnExpiredAsync()
 
 static async Task CheckRevokedSignOutAsync()
 {
-    var (store, handler, _, session) = NewSession();
-    await store.SaveAsync(Pair("acc-1", "ref-1", DateTimeOffset.UtcNow.AddMinutes(-5)));
+    // ⚠ **必须用注入的 clock,不能用 DateTimeOffset.UtcNow**。
+    // FakeClock 是固定起点(2026-09-12 10:00:00Z),而真实 UtcNow 会一直往前走:
+    // 用真实时间算 "过期 5 分钟" 的令牌,在真实时间**越过**假时钟起点之后
+    // 相对假时钟就变成了**未来才过期** → NeedsRefresh=false → StartAsync 直接
+    // 返回 true(根本不发起刷新)→ 本项第 1 条断言必挂。
+    // 这就是一条"定时炸弹式"的测试缺陷:它在 2026-09-12 17:55 CST 之前一直是绿的,
+    // 之后变成确定性失败(实测 3/3),而**产品代码一行没改**。
+    var (store, handler, clock, session) = NewSession();
+    await store.SaveAsync(Pair("acc-1", "ref-1", clock.GetUtcNow().AddMinutes(-5)));
     handler.RefreshResponses.Enqueue((HttpStatusCode.Unauthorized,
         StubHandler.ErrorJson("token_revoked", "登录状态已失效,请重新登录")));
 
@@ -414,6 +421,20 @@ sealed class StubHandler : HttpMessageHandler
 /// <summary>可控时钟(不依赖真实时间流逝 —— 用 Task.Delay 等 15 分钟是不可接受的)。</summary>
 sealed class FakeClock : TimeProvider
 {
+    // ⚠⚠ **本文件的铁律:任何"令牌什么时候过期"都必须用注入的 clock 算,
+    // 绝不能用 DateTimeOffset.UtcNow。**
+    //
+    // 原因(2026-09-12 实测踩到):这个假时钟的起点是**固定**的常量,而真实
+    // UtcNow 一直在往前走。两者混用时,"真实时间 ± 几分钟"的令牌相对假时钟
+    // 会随时间**变号**:
+    //   - 真实时间早于起点时:`UtcNow.AddMinutes(+5)` 相对假时钟是**已过期**;
+    //   - 真实时间晚于起点 5 分钟之后:`UtcNow.AddMinutes(-5)` 相对假时钟是**未过期**。
+    // 于是检查结果变成"看今天几点跑"——第 ⑨ 项就是这样从绿变红(3/3 确定性失败),
+    // 而**产品代码一行没改**,极易被误判成产品回归。
+    //
+    // 已修:第 ⑨ 项改用注入的 clock。**其余 7 处仍用 DateTimeOffset.UtcNow
+    // (76/96/117/140/163/164/293 行的 AddMinutes(+5/+30)),它们目前恰好都在绿区,
+    // 但属于同一类隐患,应在后续统一改为注入 clock(见清单"已知待办")。**
     private DateTimeOffset _now = new(2026, 9, 12, 10, 0, 0, TimeSpan.Zero);
 
     public override DateTimeOffset GetUtcNow() => _now;
