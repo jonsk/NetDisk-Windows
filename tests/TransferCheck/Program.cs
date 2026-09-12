@@ -44,6 +44,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑩ 账本落库:Save/Load 往返(真实 SQLite)且同路径不重复", CheckLedgerPersistenceAsync),
     ("⑪ 跨重启销账:重启后仍能认出自写事件", CheckLedgerSurvivesRestartAsync),
     ("⑫ 第一批跑完后再入队仍会被执行(worker 活性)", CheckEnqueueAfterDrainStillRunsAsync),
+    ("⑬ 账本对没登记过的路径不抛异常(曾经 NRE)", CheckLedgerUnknownPathAsync),
 };
 
 var failed = 0;
@@ -436,6 +437,48 @@ static async Task CheckEnqueueAfterDrainStillRunsAsync()
     }
 
     Assert(ran == 12, $"三批共 12 个任务都必须执行,实际 {ran} —— 少执行说明有批次被静默丢掉");
+}
+
+// 回归(2026-09 现场):同步日志里出现过
+//   「期望变更账本异常(已降级为「可能重复上传一次」):NullReferenceException」
+// 而当时的表现是"用户改动偶尔被多传一次"——不致命,但会让"改名不重传"这条验收
+// 时好时坏。触发点是**问一个从没登记过的路径**(对账阶段对每个远端条目都会问一次)。
+// 这里把那个触发点固定下来:账本必须回答"不是我们的",而不是抛异常。
+// ⚠ 诚实记录:当时只在 Release 下偶发、没留下栈,本次**没能复现**出原始崩溃;
+// 所以这条用例是"守住行为边界",不等于已证明根因。SyncHost 侧仍保留 try/catch 兜底
+// (账本的作用是"少传一次",绝不能因为它坏掉而打死整轮对账)。
+static Task CheckLedgerUnknownPathAsync()
+{
+    WithTempStore(store =>
+    {
+        var clock = new FakeClock();
+        var ledger = new ExpectedChangeLedger(clock: clock, sink: new SqliteExpectedChangeSink(store));
+        var ticks = clock.GetUtcNow().UtcTicks;
+
+        // ① 空账本直接问
+        Assert(ledger.TryConsume(@"C:\sync\nobody.txt", 10, ticks) == ExpectedChangeVerdict.NotOurs,
+            "从没登记过的路径必须返回 NotOurs");
+
+        // ② 登记过别的路径,再问一个未登记的(真实对账就是这种交错)
+        ledger.Record(@"C:\sync\known.txt", size: 10, mtimeTicks: ticks);
+        Assert(ledger.TryConsume(@"C:\sync\other.txt", 10, ticks) == ExpectedChangeVerdict.NotOurs,
+            "未登记路径必须返回 NotOurs");
+        Assert(ledger.PendingCount == 1, "问未登记路径不该把已登记的条目弄丢");
+
+        // ③ 同一路径反复问(销账后再次问):仍需安全回答
+        Assert(ledger.TryConsume(@"C:\sync\known.txt", 10, ticks) == ExpectedChangeVerdict.Consumed,
+            "登记过的路径应销账");
+        Assert(ledger.TryConsume(@"C:\sync\known.txt", 10, ticks) == ExpectedChangeVerdict.NotOurs,
+            "已销账的路径再问必须是 NotOurs(不能报 Consumed 把用户真实修改吞掉)");
+
+        // ④ 过期淘汰后再问(注意顺序:先登记、再让时间走、最后问)
+        ledger.Record(@"C:\sync\stale.txt", size: 5, mtimeTicks: ticks);
+        clock.Advance(TimeSpan.FromMinutes(1)); // 默认 TTL 是 10s
+        ledger.EvictExpired();
+        Assert(ledger.TryConsume(@"C:\sync\stale.txt", 5, ticks) == ExpectedChangeVerdict.NotOurs,
+            "过期条目必须失效(否则用户稍后的真实修改会被吞掉)");
+    });
+    return Task.CompletedTask;
 }
 
 // ---------------------------------------------------------------- 工具
