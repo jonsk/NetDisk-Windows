@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    SyncStateCheck —— DE-D-09 的行为检查器(零额外 NuGet)。
+    重点是两条"错了就丢用户数据"的规则:R-19(403/401 永不删本地)与
+    "404/410 二次确认才删本地"。因此这里有一条**穷举断言**:
+    遍历所有状态 × 所有事件,只有"二次确认的远端消失"才会产生 DeleteLocal。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.SyncState</RootNamespace>
+    <AssemblyName>SyncStateCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
