@@ -290,6 +290,13 @@ try
         Check("改名后远端版本递增(服务端原地改,不是新建)",
             afterNew is not null && before2 is not null && afterNew.version > before2.version,
             $"before={before2?.version} after={afterNew?.version}");
+
+        // **本地不能留下重复**:对账顺序是"先远端→本地,再本地→远端",如果下载阶段
+        // 不看"这个旧名字是被改名带走的",就会把旧名字从服务端**拉回来一份** ——
+        // 远端是对的(旧名已消失),本地却多出一个旧名字,下一轮又会被当成新文件传上去。
+        Check("改名后本地没有留下重复的旧文件",
+            File.Exists(localNew) && !File.Exists(Path.Combine(root, name2)),
+            File.Exists(Path.Combine(root, name2)) ? "本地仍残留旧名字(下载阶段把它拉回来了)" : "本地缺新名字");
     }
 }
 finally

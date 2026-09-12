@@ -235,10 +235,19 @@ public sealed class SyncHost : IAsyncDisposable
         }
 
         Notice?.Invoke($"对账:远端 {remote.Count} 个文件,进入下载阶段");
+        // **先把"本地改名"算出来**(纯本地计算,不发请求),原因是一个真实缺陷:
+        // 对账顺序是"先远端→本地,再本地→远端",而改名在**推送之前**远端当然还是旧名字 ——
+        // 下载阶段若不知道"这个旧名字是被改名带走的",就会把旧名字从服务端**拉回来一份**:
+        // 远端是对的(旧名已消失),本地却多出一个旧名字,下一轮又会被当成新文件传上去。
+        var renames = DetectLocalRenames();
         // ① 远端 → 本地
         foreach (var (rel, entry) in remote)
         {
             ct.ThrowIfCancellationRequested();
+            if (renames.OldPaths.Contains(rel))
+            {
+                continue; // 本地已改名带走:内容在新名字那边,改名由下面的阶段推送
+            }
             var local = LocalOf(rel);
             var known = KnownVersion(rel);
             if (!File.Exists(LongPath.ToExtended(local)))
@@ -272,11 +281,11 @@ public sealed class SyncHost : IAsyncDisposable
             var known = KnownVersion(rel);
             var remoteHas = remote.TryGetValue(rel, out var remoteEntry);
 
-            // ②a 改名识别(必须在"当成新文件上传"之前做)。
-            // 判据:这个路径我们**从没记过**,远端也没有它,但它的**本机文件身份**
-            // (卷+FileId)对得上某个已知条目 —— 而那个条目的旧路径已经不在了。
-            // 那就是"用户把 a.txt 改成了 b.txt",应当走改名接口,而不是再传一份。
-            if (!remoteHas && KnownFileId(rel) is null && await TryRenameAsync(rel, ct).ConfigureAwait(false))
+            // ②a 改名识别(必须在"当成新文件上传"之前做)。判据由 DetectLocalRenames
+            // 预先算好:新路径没记过、远端也没有它、而它的本机文件身份对得上某个
+            // **旧路径已消失**的已知条目 —— 那就是"用户把 a.txt 改成了 b.txt"。
+            if (!remoteHas && renames.NewToOld.TryGetValue(rel, out var renamedFrom)
+                && await TryRenameAsync(rel, renamedFrom, ct).ConfigureAwait(false))
             {
                 continue;
             }
@@ -700,40 +709,67 @@ public sealed class SyncHost : IAsyncDisposable
     // ---------------------------------------------------------------- 改名
 
     /// <summary>
-    /// 试探性处理"本地改名":是新路径、远端没有它,但它的本机文件身份对得上某个
-    /// **旧路径已消失**的已知条目 → 调改名接口,返回 true 表示"已处理,别再上传"。
+    /// 本轮对账里"本地改名"的映射(纯本地计算,不联网)。
+    /// <paramref name="NewToOld"/>:新路径 → 旧路径(推送改名用);
+    /// <paramref name="OldPaths"/>:被改名带走的旧路径集合(下载阶段要跳过它们)。
     ///
-    /// 为什么用身份而不是名字:改名后名字已经变了,唯一不变的是文件身份
-    /// (卷序列号 + FileId)。这也是 DE-D-11 那套东西存在的理由。
-    /// 任何不确定的情形都返回 false(= 交给原来的"当新文件上传"路径)——
-    /// **宁可贵一次上传,也不能因为猜错而把用户的文件搬走**。
+    /// 判据:新路径我们**从没记过**,而它的**本机文件身份**(卷序列号 + FileId,
+    /// DE-D-11)对得上某个已知条目,且那个条目的旧路径**已经不存在**了。
+    /// 改名后名字已经变了,唯一不变的就是文件身份 —— 这也是 DE-D-11 存在的理由。
+    ///
+    /// 任何不确定的情形都不进映射(= 走原来的"当新文件上传"):宁可贵一次上传,
+    /// 也不能因为猜错把用户的文件搬走。身份拿不到(NTFS 之外的盘/权限)时同理。
     /// </summary>
-    private async Task<bool> TryRenameAsync(string rel, CancellationToken ct)
+    private (Dictionary<string, string> NewToOld, HashSet<string> OldPaths) DetectLocalRenames()
+    {
+        var newToOld = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var oldPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (rel, _) in ScanLocal())
+        {
+            if (KnownFileId(rel) is not null)
+            {
+                continue; // 这个路径我们认识 → 不是改名(是常规改动)
+            }
+            var idn = IdentityOf(LocalOf(rel));
+            if (idn is null)
+            {
+                continue;
+            }
+            var old = _store.Scalar(
+                "SELECT local_path FROM sync_state WHERE local_identity=$id LIMIT 1",
+                ("id", FormatIdentity(idn.Value)));
+            if (old is null or DBNull)
+            {
+                continue;
+            }
+            var oldRel = Convert.ToString(old)!;
+            if (string.Equals(oldRel, rel, StringComparison.OrdinalIgnoreCase))
+            {
+                continue; // 路径没变(第一次见到它)→ 常规上传
+            }
+            if (File.Exists(LongPath.ToExtended(LocalOf(oldRel))))
+            {
+                continue; // 旧路径还在:这不是改名(更像复制),让两边各自正常同步
+            }
+            if (KnownFileId(oldRel) is null)
+            {
+                continue; // 旧路径本来就没有远端条目 → 没有"改名"可推
+            }
+            newToOld[rel] = oldRel;
+            oldPaths.Add(oldRel);
+        }
+        return (newToOld, oldPaths);
+    }
+
+    /// <summary>
+    /// 推送一次改名:把远端已存在的条目按 <paramref name="oldRel"/> 对应的 file_id
+    /// 原地改成 <paramref name="rel"/> 的名字。返回 true 表示"已处理,别再上传"。
+    /// </summary>
+    private async Task<bool> TryRenameAsync(string rel, string oldRel, CancellationToken ct)
     {
         var local = LocalOf(rel);
-        var idn = IdentityOf(local);
-        if (idn is null)
-        {
-            return false;
-        }
-        var identity = FormatIdentity(idn.Value);
-
-        var oldRel = _store.Scalar(
-            "SELECT local_path FROM sync_state WHERE local_identity=$id LIMIT 1", ("id", identity));
-        if (oldRel is null or DBNull)
-        {
-            return false;
-        }
-        var oldPath = Convert.ToString(oldRel)!;
-        if (string.Equals(oldPath, rel, StringComparison.OrdinalIgnoreCase))
-        {
-            return false; // 路径没变(只是第一次见到它)→ 走常规上传
-        }
-        if (File.Exists(LongPath.ToExtended(LocalOf(oldPath))))
-        {
-            return false; // 旧路径还在:这不是改名(更像复制),让两边各自正常同步
-        }
-        var fileId = KnownFileId(oldPath);
+        var fileId = KnownFileId(oldRel);
         if (string.IsNullOrEmpty(fileId))
         {
             return false;
@@ -741,16 +777,16 @@ public sealed class SyncHost : IAsyncDisposable
 
         try
         {
-            Upsert(rel, SyncState.PendingUpload, $"识别为改名({oldPath} → {rel})", KnownVersion(oldPath));
-            var after = await _files.RenameAsync(fileId!, Path.GetFileName(local), KnownVersion(oldPath), ct)
+            Upsert(rel, SyncState.PendingUpload, $"识别为改名({oldRel} → {rel})", KnownVersion(oldRel));
+            var after = await _files.RenameAsync(fileId!, Path.GetFileName(local), KnownVersion(oldRel), ct)
                 .ConfigureAwait(false);
             // 状态库一行以 file_id 为主键 → 改 local_path 即可,**不产生第二行**,
             // 远端 file_id / 版本号都保持连续(这正是"改名不重传"的意义)。
             SaveState(after, rel, local);
             _store.Execute("DELETE FROM sync_state WHERE local_path=$p AND file_id<>$id",
-                ("p", oldPath), ("id", fileId!));
-            Upsert(rel, SyncState.InSync, $"已改名(原 {oldPath})", after.version);
-            Notice?.Invoke($"改名:{oldPath} → {rel}(未重传)");
+                ("p", oldRel), ("id", fileId!));
+            Upsert(rel, SyncState.InSync, $"已改名(原 {oldRel})", after.version);
+            Notice?.Invoke($"改名:{oldRel} → {rel}(未重传)");
             return true;
         }
         catch (Exception ex)
@@ -758,7 +794,7 @@ public sealed class SyncHost : IAsyncDisposable
             // 改名失败**不能**吞:吞掉的话本地会一直停在"没有对应远端条目"的状态,
             // 而用户以为改完了。这里如实报出并降级为普通上传(数据安全优先 —— 宁可多传一份,
             // 也不能让文件停在两个地方都不对的状态)。
-            Notice?.Invoke($"改名失败({oldPath} → {rel}),将按新文件上传:{ex.Message}");
+            Notice?.Invoke($"改名失败({oldRel} → {rel}),将按新文件上传:{ex.Message}");
             return false;
         }
     }
