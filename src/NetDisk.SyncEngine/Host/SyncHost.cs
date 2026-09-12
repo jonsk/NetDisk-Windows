@@ -49,6 +49,11 @@ public sealed class SyncHost : IAsyncDisposable
     private readonly TransferQueue _queue;
     private readonly FileWatcher? _watcher;
     private readonly List<SyncEntryStatus> _status = new();
+    // 对账必须**串行**:监听器回调、启动、手动触发三者都可能同时想对账。
+    // 实测后果不是"慢一点",而是**挂死**:两个对账同时写 SQLite 状态库并互相
+    // 等待队列排空,谁也走不到 DrainAsync 的结束条件。
+    private readonly SemaphoreSlim _reconcileGate = new(1, 1);
+    private int _reconcilePending;
     private readonly object _gate = new();
     private CancellationTokenSource? _cts;
     private Task? _localLoop;
@@ -67,7 +72,8 @@ public sealed class SyncHost : IAsyncDisposable
         ApiClient api,
         TimeProvider? clock = null,
         bool watchLocal = true,
-        Func<ITokenProvider, string, SseChangeStream>? sseFactory = null)
+        Func<ITokenProvider, string, SseChangeStream>? sseFactory = null,
+        string? statePath = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _tokens = tokens ?? throw new ArgumentNullException(nameof(tokens));
@@ -75,9 +81,11 @@ public sealed class SyncHost : IAsyncDisposable
         _sseFactory = sseFactory;
         _files = new FileApi(api);
 
-        var statePath = Path.Combine(
+        // 状态库路径**可注入**:一是让检查器能在临时目录里跑(不污染用户真实状态),
+        // 二是出问题时能把状态库挪到别处做实验,而不是去动用户的 %APPDATA%。
+        var resolvedState = statePath ?? Path.Combine(
             Path.GetDirectoryName(ClientConfig.DefaultPath())!, "state.db");
-        _store = StateStore.Open(statePath);
+        _store = StateStore.Open(resolvedState);
         _ledger = new ExpectedChangeLedger(clock: _clock, sink: new SqliteExpectedChangeSink(_store));
         _queue = new TransferQueue(clock: _clock);
         if (watchLocal && !string.IsNullOrWhiteSpace(_config.SyncRoot))
@@ -140,6 +148,35 @@ public sealed class SyncHost : IAsyncDisposable
     /// 先远端→本地(缺的下载、旧的更新),再本地→远端(新文件/改动上传)。
     /// </summary>
     public async Task ReconcileAsync(CancellationToken ct = default)
+    {
+        // 已有对账在跑:记一个"待跑"标记后立刻返回(合并请求),由正在跑的那次收尾时再跑一遍。
+        // 不这样做就会堆积 N 个并发对账 —— 它们互相踩状态库与队列。
+        if (!await _reconcileGate.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            Interlocked.Exchange(ref _reconcilePending, 1);
+            return;
+        }
+        try
+        {
+            // 上限 3 轮:即便期间不断有新事件(活锁风险),也不会把一次调用变成永动机;
+            // 剩下的改动交给下一次事件/下一轮对账处理,而不是在这里空转。
+            var rounds = 0;
+            do
+            {
+                Interlocked.Exchange(ref _reconcilePending, 0);
+                await ReconcileCoreAsync(ct).ConfigureAwait(false);
+                rounds++;
+            }
+            while (Interlocked.CompareExchange(ref _reconcilePending, 0, 0) == 1
+                   && !ct.IsCancellationRequested && rounds < 3);
+        }
+        finally
+        {
+            _reconcileGate.Release();
+        }
+    }
+
+    private async Task ReconcileCoreAsync(CancellationToken ct)
     {
         var spaceId = await ResolveSpaceIdAsync(ct).ConfigureAwait(false);
         var remote = new Dictionary<string, EntryView>(StringComparer.OrdinalIgnoreCase);
@@ -500,6 +537,25 @@ public sealed class SyncHost : IAsyncDisposable
             return false;
         }
         var info = new FileInfo(LongPath.ToExtended(local));
+
+        // ⚠ **先问账本**:对账自己会写盘(下载落盘),watcher 会把这些写也报成"变了"。
+        // 不销账的后果不是"多传一次",而是**自激循环**:写盘 → 事件 → 对账 → 又写盘 …
+        // 实测:正是这个循环让对账永不结束(整个端到端检查器挂死)。
+        // 账本出问题**不能**把整轮对账打死:它的作用是"少传一次",而不是数据安全本身 ——
+        // 但它也**不能静默**:吞掉异常会让"账本一直坏着"这件事没人知道。所以降级为
+        // "可能多传一次(幂等)"并把原因报到状态列表/通知里。
+        try
+        {
+            if (_ledger.TryConsume(rel, info.Length, info.LastWriteTimeUtc.Ticks) == ExpectedChangeVerdict.Consumed)
+            {
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Notice?.Invoke($"期望变更账本异常(已降级为「可能重复上传一次」):{ex.GetType().Name}: {ex.Message}");
+        }
+
         var size = _store.Scalar("SELECT size FROM sync_state WHERE local_path=$p", ("p", rel));
         var mtime = _store.Scalar("SELECT local_mtime_ticks FROM sync_state WHERE local_path=$p", ("p", rel));
         if (size is null or DBNull)

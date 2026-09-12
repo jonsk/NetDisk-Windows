@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    SyncHostCheck —— 客户端接线(登录 + 双向同步)的**端到端**检查器(零 NuGet)。
+
+    与其它检查器不同:它打**真实服务端**(环境变量 NETDISK_E2E_BASE,默认
+    http://127.0.0.1:8080),跑真实登录/令牌注入/TUS 上传/下载/冲突副本/状态库持久化。
+    没有 NETDISK_E2E_PASS 时打印 SKIP 并 exit 0(CI 无凭据也能过)。
+
+    需要 net10.0-windows:要引用 SyncEngine(DpapiTokenStore 用 DPAPI)。
+    App 不在引用范围内(检查器不该依赖 UI)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.SyncHost</RootNamespace>
+    <AssemblyName>SyncHostCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>

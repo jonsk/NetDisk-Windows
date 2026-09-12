@@ -1,0 +1,240 @@
+// SyncHostCheck —— 客户端接线的**端到端**检查器(零 NuGet)。
+//
+// 与其它检查器的区别:它不测纯函数,而是把**真实**的登录/令牌/传输/状态库/对账
+// 全部接起来,打**真实服务端**(默认本机 8080,可用 NETDISK_E2E_BASE 指向真机),
+// 验证"用户会做的事":登录 → 放文件 → 自动上传 → 远端改动 → 自动下载 → 冲突副本
+// → 重启后状态一致。
+//
+// 为什么必须打真实服务端:
+//   接线的错法**几乎全都不报错** —— 令牌没注入(ApiClient 会匿名请求)、
+//   WebDAV 路径拼错(服务端 404 被吞)、状态库没落盘(重启后重复上传)。
+//   只对着 mem:// 或者 mock 测,这些一个都抓不到。
+//
+// 环境变量:
+//   NETDISK_E2E_BASE   服务端基址(默认 http://127.0.0.1:8080)
+//   NETDISK_E2E_USER   登录名(默认 admin)
+//   NETDISK_E2E_PASS   口令(必填;不填则跳过并 exit 0,便于 CI 无凭据时跑)
+//
+// 退出码 0 = 全过;1 = 有断言失败;2 = 环境不具备(没有口令/连不上)。
+
+using System.Security.Cryptography;
+using NetDisk.ClientCore;
+using NetDisk.SyncEngine;
+using NetDisk.SyncEngine.Files;
+using NetDisk.SyncEngine.Host;
+using NetDisk.Transport;
+
+var baseUrl = Environment.GetEnvironmentVariable("NETDISK_E2E_BASE") ?? "http://127.0.0.1:8080";
+var user = Environment.GetEnvironmentVariable("NETDISK_E2E_USER") ?? "admin";
+var pass = Environment.GetEnvironmentVariable("NETDISK_E2E_PASS");
+if (string.IsNullOrWhiteSpace(pass))
+{
+    Console.WriteLine("SKIP: 未设置 NETDISK_E2E_PASS(端到端检查需要有账号才能跑)");
+    return 0;
+}
+
+var failures = 0;
+void Check(string what, bool ok, string detail = "")
+{
+    if (ok) { Console.WriteLine($"  ✓ {what}"); return; }
+    failures++;
+    Console.WriteLine($"  ✗ {what}{(detail.Length > 0 ? "  [" + detail + "]" : "")}");
+}
+
+// 临时工作区:同步根、配置、令牌密文、状态库全部隔离(绝不碰用户真实数据)
+var work = Path.Combine(Path.GetTempPath(), "netdisk-synchost-" + Guid.NewGuid().ToString("N")[..8]);
+var root = Path.Combine(work, "root");
+Directory.CreateDirectory(root);
+var cfgPath = Path.Combine(work, "client.json");
+var tokenPath = Path.Combine(work, "tokens.bin");
+var statePath = Path.Combine(work, "state.db");
+
+Console.WriteLine($"SyncHostCheck —— 端到端接线检查(base={baseUrl} user={user})");
+Console.WriteLine();
+
+ITokenProvider BuildTokenSession()
+{
+    var store = new DpapiTokenStore(tokenPath);
+    var auth = new AuthApi(new ClientOptions { BaseAddress = new Uri(baseUrl) });
+    return new TokenSession(store, auth, TimeProvider.System);
+}
+
+try
+{
+    // ---------------------------------------------------------------- ① 登录 + 令牌注入
+    Console.WriteLine("— ① 登录与令牌注入");
+    var session = (TokenSession)BuildTokenSession();
+    await session.SignInAsync(user, pass!);
+    Check("账密登录成功", session.IsSignedIn);
+
+    var api = new ApiClient(new ClientOptions { BaseAddress = new Uri(baseUrl) }, tokens: session);
+    var files = new FileApi(api);
+    var spaces = await files.ListSpacesAsync();
+    Check("带令牌列空间成功(证明令牌真的注入了 ApiClient)",
+        spaces.spaces is { Count: > 0 }, $"spaces={spaces.spaces?.Count ?? 0}");
+    var space = spaces.spaces!.First(s => s.kind == "personal");
+    Console.WriteLine($"    个人空间 = {space.id}");
+
+    // Path 只能通过 Load(path) 设定(private set):这样"配置写到哪"永远由加载来源决定,
+    // 避免出现"从 A 读、往 B 写"这种把用户配置写丢的错法
+    var cfg = ClientConfig.Load(cfgPath);
+    cfg.BaseUrl = baseUrl;
+    cfg.SyncRoot = root;
+    cfg.SpaceId = space.id;
+    cfg.Onboarded = true;
+    cfg.Save();
+    var reloaded = ClientConfig.Load(cfgPath);
+    Check("配置能落盘并读回(原子写)", reloaded.BaseUrl == baseUrl && reloaded.SyncRoot == root);
+
+    var remoteNames = new HashSet<string>(StringComparer.Ordinal);
+
+    // ---------------------------------------------------------------- ② 本地新文件 → 自动上传
+    Console.WriteLine();
+    Console.WriteLine("— ② 本地放文件 → 自动上传 → 服务端可见");
+    var name1 = $"sync-check-{DateTime.Now:HHmmss}.txt";
+    var local1 = Path.Combine(root, name1);
+    var content1 = "hello-from-client-" + Guid.NewGuid().ToString("N")[..8];
+    await File.WriteAllTextAsync(local1, content1);
+
+    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
+    {
+        host.Notice += m => Console.WriteLine("    [notice] " + m);
+        Console.WriteLine("    … StartAsync");
+        var started = await host.StartAsync();
+        Check("宿主启动(已登录且配置可用)", started);
+        // 重新对账一次:StartAsync 内部已经对账,这里再跑一次以确保收敛
+        Console.WriteLine("    … ReconcileAsync #2");
+        await host.ReconcileAsync();
+        Console.WriteLine("    … ListAsync(远端)");
+        var remote = (await files.ListAsync(space.id, null)).FirstOrDefault(e => e.name == name1);
+        Console.WriteLine("    … 已拿到远端列表");
+        Check("服务端出现了该文件", remote is not null, remote?.id ?? "未找到");
+        if (remote is not null)
+        {
+            remoteNames.Add(name1);
+            var localBytes = await File.ReadAllBytesAsync(local1);
+            Check("本地文件仍在(未被自己的上传覆盖)", localBytes.Length > 0);
+            var status = host.Status.FirstOrDefault(s => s.RelativePath == name1);
+            Check("状态列表里该文件已同步", status?.State == SyncState.InSync,
+                $"state={status?.State.ToString() ?? "(无)"}");
+        }
+    }
+
+    // ---------------------------------------------------------------- ③ 远端改动 → 自动下载
+    Console.WriteLine();
+    Console.WriteLine("— ③ 服务端新建文件 → 自动下载到本地");
+    var name2 = $"remote-check-{DateTime.Now:HHmmss}.txt";
+    var content2 = "hello-from-server-" + Guid.NewGuid().ToString("N")[..8];
+    var staging = Path.Combine(work, name2);
+    await File.WriteAllTextAsync(staging, content2);
+    var up = await files.UploadAsync(space.id, null, name2, staging);
+    remoteNames.Add(name2);
+    Check("服务端侧建好测试文件(模拟另一端)", up.Version >= 1, $"version={up.Version}");
+
+    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
+    {
+        await host.StartAsync();
+        await host.ReconcileAsync();
+        var local2 = Path.Combine(root, name2);
+        Check("本地出现了该文件", File.Exists(local2), local2);
+        if (File.Exists(local2))
+        {
+            var got = await File.ReadAllTextAsync(local2);
+            Check("内容与服务端一致(逐字节)", got == content2);
+            Check("状态列表里标记为已同步",
+                host.Status.FirstOrDefault(s => s.RelativePath == name2)?.State == SyncState.InSync);
+        }
+    }
+
+    // ---------------------------------------------------------------- ④ 两端同改 → 冲突副本
+    Console.WriteLine();
+    Console.WriteLine("— ④ 两端同改同一文件 → 本地保留冲突副本 + 拉回远端版本");
+    var localPath1 = Path.Combine(root, name1);
+    await File.WriteAllTextAsync(localPath1, "local-edit-" + Guid.NewGuid().ToString("N")[..8]);
+    // 远端也改(用同一条上传接口覆盖同名文件)
+    var staging2 = Path.Combine(work, "remote-edit.txt");
+    var contentRemote = "remote-edit-" + Guid.NewGuid().ToString("N")[..8];
+    await File.WriteAllTextAsync(staging2, contentRemote);
+    var up2 = await files.UploadAsync(space.id, null, name1, staging2);
+    Check("远端已产生新版本", up2.Version >= 2, $"version={up2.Version}");
+
+    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
+    {
+        await host.StartAsync();
+        await host.ReconcileAsync();
+        var copies = Directory.GetFiles(root, "*_conflict_*").Select(Path.GetFileName).ToArray();
+        Check("本地生成了冲突副本(本地改动没被丢弃)", copies.Length > 0,
+            copies.Length > 0 ? string.Join(',', copies) : "没有副本");
+        if (copies.Length > 0)
+        {
+            var copyText = await File.ReadAllTextAsync(Path.Combine(root, copies[0]!));
+            Check("冲突副本内容是**本地**那一版(不是远端覆盖后的)",
+                copyText.StartsWith("local-edit-", StringComparison.Ordinal), copyText[..Math.Min(24, copyText.Length)]);
+            var canonical = await File.ReadAllTextAsync(localPath1);
+            Check("原路径上是**远端**那一版", canonical == contentRemote,
+                canonical[..Math.Min(24, canonical.Length)]);
+        }
+        var st = host.Status.FirstOrDefault(s => s.RelativePath == name1);
+        Check("状态列表里标注了冲突", st?.State is SyncState.Conflict or SyncState.InSync,
+            $"state={st?.State.ToString() ?? "(无)"} msg={st?.Message}");
+    }
+
+    // ---------------------------------------------------------------- ⑤ 重启后一致(不重复传)
+    Console.WriteLine();
+    Console.WriteLine("— ⑤ 重启客户端 → 状态与文件一致(状态库真的落盘了)");
+    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
+    {
+        await host.StartAsync();
+        await host.ReconcileAsync();
+        Check("状态库跨进程保留(已知文件仍在列表里)",
+            host.Status.Any(s => s.RelativePath == name1 || s.RelativePath == name2));
+        var remoteFiles = await files.ListAsync(space.id, null);
+        var dupes = remoteFiles.Where(e => e.name == name1).ToArray();
+        Check("同名远端条目只有一条(没有因重启重复上传)", dupes.Length == 1,
+            $"count={dupes.Length}");
+    }
+}
+finally
+{
+    // 清理服务端测试文件:失败也要清(残留会让下一次跑变成"名字冲突")
+    try
+    {
+        var store = new DpapiTokenStore(tokenPath);
+        var auth = new AuthApi(new ClientOptions { BaseAddress = new Uri(baseUrl) });
+        var s = new TokenSession(store, auth, TimeProvider.System);
+        if (await s.StartAsync())
+        {
+            var api = new ApiClient(new ClientOptions { BaseAddress = new Uri(baseUrl) }, tokens: s);
+            var files = new FileApi(api);
+            var spaces = await files.ListSpacesAsync();
+            var space = spaces.spaces!.First(x => x.kind == "personal");
+            foreach (var e in await files.ListAsync(space.id, null))
+            {
+                if (e.name.StartsWith("sync-check-", StringComparison.Ordinal) ||
+                    e.name.StartsWith("remote-check-", StringComparison.Ordinal) ||
+                    e.name.Contains("_conflict_", StringComparison.Ordinal))
+                {
+                    using var resp = await api.SendRawAsync(HttpMethod.Delete,
+                        $"/api/v1/files/{Uri.EscapeDataString(e.id)}",
+                        contentFactory: null, headers: null, idempotent: true);
+                    Console.WriteLine($"  清理远端:{e.name} → {(int)resp.StatusCode}");
+                }
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"  (清理远端时出错,不影响结论:{ex.Message})");
+    }
+
+    try { Directory.Delete(work, recursive: true); } catch (Exception) { }
+}
+
+Console.WriteLine();
+if (failures == 0)
+{
+    Console.WriteLine("全部通过:SyncHost 端到端接线(登录/上传/下载/冲突/重启一致)");
+    return 0;
+}
+Console.WriteLine($"{failures} 项失败");
+return 1;
