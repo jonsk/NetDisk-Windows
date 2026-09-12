@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    SpaceCollabCheck —— DE-D-17 检查器(零额外 NuGet)。
+    ①**与 H5 同一组接口**:把客户端实际用的路径与 `docs/api/openapi.yaml` 里存在的路径
+      逐条对照(多写一个不存在的路径 = 发明接口;少写一个 = 功能没接上);
+    ②**权限判断不在端上**:机械规则(去注释后)扫协作相关源码,不得出现把"角色/是否 owner"
+      与"要不要发请求"绑起来的判断;并用**行为断言**证明:服务端 403 时该请求**已经发出去了**
+      (端上没有提前拦),然后才是把错误交给 UI;
+    ③分享创建走同一条 `/api/v1/shares`(不另开一套)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.SpaceCollab</RootNamespace>
+    <AssemblyName>SpaceCollabCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -93,6 +93,48 @@ public sealed record SpaceBrief
     public required string name { get; init; }
 }
 
+/// <summary>SpaceView</summary>
+public sealed record SpaceView
+{
+    public required string id { get; init; }
+    public required string kind { get; init; }
+    public required string name { get; init; }
+    public required string owner_id { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? quota_bytes { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? used_bytes { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? frozen { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? is_owner { get; init; }
+}
+
+/// <summary>MemberView</summary>
+public sealed record MemberView
+{
+    public required string user_id { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? username { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? display_name { get; init; }
+    public required string permission { get; init; }
+}
+
+/// <summary>SpaceList</summary>
+public sealed record SpaceList
+{
+    public required List<SpaceView> spaces { get; init; }
+    public required long total { get; init; }
+}
+
+/// <summary>MemberList</summary>
+public sealed record MemberList
+{
+    public required List<MemberView> members { get; init; }
+    public required long total { get; init; }
+}
+
 /// <summary>EntryView</summary>
 public sealed record EntryView
 {
