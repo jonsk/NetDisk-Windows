@@ -15,6 +15,7 @@ using System.Text.RegularExpressions;
 using NetDisk.Transport;
 
 const string SpaceClientSource = "desktop/src/NetDisk.Transport/SpaceCollabClient.cs";
+const string ViewSource = "desktop/src/NetDisk.App/Views/SpacesView.xaml.cs";
 
 var checks = new List<(string Name, Func<Task> Run)>
 {
@@ -28,6 +29,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑧ 机械规则:视图层同样不含权限判断", CheckViewLayerCleanAsync),
     ("⑨ 空间视图的 is_owner/permission 只用于展示(不参与任何分支)", CheckDisplayOnlyAsync),
     ("⑩ 解散是硬删:服务层不提供「回收站」式语义", CheckDissolveIsHardDeleteAsync),
+    ("⑪ 视图的每个动作都真的调用服务端(不被端上拦住)", CheckViewCallsServiceAsync),
 };
 
 var failed = 0;
@@ -195,21 +197,56 @@ static Task CheckNoPermissionGateAsync()
 
 static Task CheckViewLayerCleanAsync()
 {
-    // 视图层(若已落地)同样不得持有权限判断 —— 判权在服务端是**全局**纪律,不是某一层的事。
-    var view = TryLocate("desktop/src/NetDisk.App/Views/SpacesView.xaml.cs");
-    if (view is null)
+    // 视图层(DE-D-17 已落地)同样不得持有权限判断 —— 判权在服务端是**全局**纪律。
+    // 允许:用服务端给的 is_owner 显示一行角色说明(纯展示);
+    // 禁止:用它决定按钮能否点、或决定要不要发请求。
+    var view = File.ReadAllText(Locate(ViewSource));
+    var code = StripComments(view);
+
+    foreach (var f in new[] { "== \"manager\"", "== \"editor\"", "== \"reader\"",
+                              "Permission ==", "HasPermission", "CanManage", "CanInvite", "CheckPermission" })
     {
-        return Task.CompletedTask; // 视图尚未落地时不阻断(该项由 DE-D-17 的 UI 部分交付)
+        Assert(!code.Contains(f, StringComparison.Ordinal),
+            $"视图层出现 {f}:判权不得在端上(4.3)");
     }
-    var source = StripComments(File.ReadAllText(view));
-    foreach (var f in new[] { "== \"manager\"", "Permission ==", "HasPermission", "CanManage" })
-    {
-        Assert(!source.Contains(f, StringComparison.Ordinal),
-            $"视图层出现 {f}:判权不得在端上(按钮显隐可以用服务端给的 is_owner,但不能作为**动作**的门禁)");
-    }
+
+    // 按钮不得因角色而禁用(is_owner 只配用于展示文案)
+    Assert(!code.Contains("IsEnabled", StringComparison.Ordinal),
+        "视图不该用 IsEnabled 给动作加端上门禁:让服务端拒绝并显示它的原因");
+
+    // 硬删二次确认:解散前必须把空间名原样输入(H5 同款);
+    // 这不是判权,而是防误触 —— 但它必须真的在代码里。
+    // 断言的是**那次比较本身**(而不是"出现过这两个标识符"):第一版只查标识符,
+    // 把守卫删掉之后 `DissolveConfirmName.Clear()` 仍带着标识符,用例照样绿。
+    Assert(code.Contains("string.Equals(DissolveConfirmName.Text, _selected.name", StringComparison.Ordinal),
+        "解散前必须有「手输空间名」的二次确认(硬删、4.5 无回收站)");
+
     return Task.CompletedTask;
 }
 
+/// <summary>每个动作都必须真的调用服务端(不被端上"提前拦下")。</summary>
+static Task CheckViewCallsServiceAsync()
+{
+    var code = StripComments(File.ReadAllText(Locate(ViewSource)));
+    string[] calls =
+    {
+        "_client.ListMineAsync",
+        "_client.CreateAsync",
+        "_client.ListMembersAsync",
+        "_client.InviteAsync",
+        "_client.RemoveMemberAsync",
+        "_client.TransferAsync",
+        "_client.LeaveAsync",
+        "_client.DissolveAsync",
+        "_client.CreateShareAsync",
+    };
+    foreach (var c in calls)
+    {
+        Assert(code.Contains(c, StringComparison.Ordinal),
+            $"视图必须真的调用 {c}(端上不得拦住动作:判权只在服务端)");
+    }
+    return Task.CompletedTask;
+}
 static Task CheckDisplayOnlyAsync()
 {
     // `is_owner` / `permission` 只能被**读出来展示**;不存在任何"用它们做分支"的方法。

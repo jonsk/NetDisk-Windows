@@ -1,0 +1,91 @@
+<UserControl x:Class="NetDisk.App.Views.SpacesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:NetDisk.App.Views">
+  <!--
+    团队空间协作 + 分享创建(DE-D-17;与 H5 同一组接口)。
+
+    两条纪律体现在界面上:
+      1.**按钮不做权限门禁**:所有动作按钮始终可点,被服务端拒绝时把服务端给的
+        原因显示出来(4.3:判权只在服务端)。`is_owner` 只用来显示一行"你是所有者"。
+      2.**解散要手输空间名**(硬删,4.5 无回收站):按钮先把名字填进待确认框,
+        只有输入与空间名完全一致才允许提交 —— 与 H5 的二次确认同款。
+  -->
+  <Grid Margin="12">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="260" />
+      <ColumnDefinition Width="*" />
+    </Grid.ColumnDefinitions>
+
+    <!-- 左:空间列表 + 建空间 + 分享 -->
+    <StackPanel Grid.Column="0" Margin="0,0,12,0">
+      <TextBlock FontSize="16" FontWeight="SemiBold" Text="团队空间" />
+
+      <TextBlock Margin="0,6,0,0" Foreground="#666" Text="只显示服务端允许我看到的空间" />
+      <ListBox x:Name="SpaceList" Height="180" Margin="0,4,0,0"
+               SelectionChanged="OnSpaceSelected" />
+
+      <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+        <TextBox x:Name="NewSpaceName" Width="150" />
+        <Button x:Name="CreateSpaceButton" Margin="6,0,0,0" Content="建空间"
+                Click="OnCreateSpace" />
+      </StackPanel>
+
+      <Separator Margin="0,12,0,8" />
+      <TextBlock FontWeight="SemiBold" Text="创建分享链接" />
+      <TextBlock Margin="0,4,0,0" Foreground="#666" Text="文件 id(在客户端文件树里右键获取)" />
+      <TextBox x:Name="ShareFileId" Margin="0,2,0,0" />
+      <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+        <TextBlock Text="有效期(小时)" VerticalAlignment="Center" />
+        <TextBox x:Name="ShareExpiresHours" Width="48" Margin="6,0,0,0" Text="24" />
+        <TextBlock Text="口令" VerticalAlignment="Center" Margin="8,0,0,0" />
+        <TextBox x:Name="SharePassword" Width="80" Margin="6,0,0,0" />
+      </StackPanel>
+      <Button x:Name="CreateShareButton" Margin="0,6,0,0" Content="创建分享"
+              Click="OnCreateShare" />
+      <TextBox x:Name="ShareLink" Margin="0,6,0,0" IsReadOnly="True" TextWrapping="Wrap"
+               Height="48" VerticalScrollBarVisibility="Auto" />
+    </StackPanel>
+
+    <!-- 右:选中空间的成员与协作动作 -->
+    <StackPanel Grid.Column="1">
+      <TextBlock x:Name="SelectedSpaceTitle" FontSize="16" FontWeight="SemiBold" Text="未选择空间" />
+      <TextBlock x:Name="SelectedSpaceRole" Margin="0,4,0,0" Foreground="#666" />
+
+      <TextBlock Margin="0,10,0,0" FontWeight="SemiBold" Text="成员" />
+      <ListBox x:Name="MemberList" Height="140" Margin="0,4,0,0" />
+
+      <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+        <TextBlock Text="用户名" VerticalAlignment="Center" />
+        <TextBox x:Name="InviteUsername" Width="120" Margin="6,0,0,0" />
+        <ComboBox x:Name="InvitePermission" Width="100" Margin="6,0,0,0" SelectedIndex="2">
+          <ComboBoxItem Content="manager" />
+          <ComboBoxItem Content="editor" />
+          <ComboBoxItem Content="reader" />
+        </ComboBox>
+        <Button x:Name="InviteButton" Margin="6,0,0,0" Content="邀请" Click="OnInvite" />
+        <Button x:Name="RemoveButton" Margin="6,0,0,0" Content="移除所选成员" Click="OnRemoveMember" />
+      </StackPanel>
+
+      <Separator Margin="0,12,0,8" />
+
+      <StackPanel Orientation="Horizontal">
+        <TextBlock Text="转让给(用户名)" VerticalAlignment="Center" />
+        <TextBox x:Name="TransferUsername" Width="120" Margin="6,0,0,0" />
+        <Button x:Name="TransferButton" Margin="6,0,0,0" Content="转让" Click="OnTransfer" />
+        <Button x:Name="LeaveButton" Margin="6,0,0,0" Content="退出空间" Click="OnLeave" />
+      </StackPanel>
+
+      <Separator Margin="0,12,0,8" />
+      <TextBlock FontWeight="SemiBold" Foreground="#A00" Text="解散空间(硬删,不可恢复)" />
+      <TextBlock Margin="0,4,0,0" Foreground="#666"
+                 Text="为避免误点:请把空间名原样输入下面的框,再点解散。" />
+      <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+        <TextBox x:Name="DissolveConfirmName" Width="180" />
+        <Button x:Name="DissolveButton" Margin="6,0,0,0" Content="解散空间" Click="OnDissolve" />
+      </StackPanel>
+
+      <TextBlock x:Name="StatusText" Margin="0,10,0,0" TextWrapping="Wrap" Foreground="#444" />
+    </StackPanel>
+  </Grid>
+</UserControl>
