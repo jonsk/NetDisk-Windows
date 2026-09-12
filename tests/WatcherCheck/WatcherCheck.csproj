@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    WatcherCheck —— DE-D-08 的行为检查器(零额外 NuGet)。
+    这里既跑**真的** FileSystemWatcher(证明后端可用),也用假后端把"溢出 → 只重扫该子树"
+    这条逻辑跑出来(真的撑爆系统缓冲区不是一条能稳定复现的用例)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Watcher</RootNamespace>
+    <AssemblyName>WatcherCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
