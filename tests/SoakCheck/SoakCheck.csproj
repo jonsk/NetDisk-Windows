@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    SoakCheck —— DE-D-21 检查器(零额外 NuGet)。
+    ①线程纪律探测器:未标记 UI 线程时判定**不算通过**(不能判定 ≠ 通过);
+      后台线程上跑同步引擎动作 → 0 违规;在 UI 线程上跑同步引擎动作 → 违规;
+      后台线程碰 UI 对象 → 违规;违规列表排空一次;记录有上限。
+    ②采样有效性:真采样的句柄/内存/工作集必须是正数,CSV 往返一致,坏行被拒,
+      采样坏掉(恒 0 或 -1)必须**判失败**(否则坏采样器会让曲线"完美平稳")。
+    ③判定:24h 平稳曲线通过(抖动不误判);句柄/内存/工作集单向增长分别被抓到;
+      违规 ≥ 1 或违规计数回退 → 失败;3 个样本或 1 小时跨度**不足以**声称 24h。
+    ④SoakRecorder 真实落盘:表头唯一、行数正确、可解析。
+
+    `SoakCheck` 带参数 `load <秒>` 跑**压缩冒烟**:真实组件(StateStore 开关循环 +
+    期望变更账本 + 通知中心 + 后台线程纪律判定)产生真实负载并采样判定。
+    诚实标注:压缩冒烟不是 24h 验收那条;24h 由 .run/soak_client.ps1 跑真客户端 exe。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Soak</RootNamespace>
+    <AssemblyName>SoakCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
