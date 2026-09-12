@@ -54,6 +54,12 @@ public sealed class SyncHost : IAsyncDisposable
     // 等待队列排空,谁也走不到 DrainAsync 的结束条件。
     private readonly SemaphoreSlim _reconcileGate = new(1, 1);
     private int _reconcilePending;
+    // 空间**根目录**的 id:相对路径必须相对它算,否则第一层会多出一个根目录名
+    // (实测:远端算出 "根目录/x",本地扫描是 "x" → 两边永不相等 → 每轮都在
+    //  "下载一个不存在的新文件" 与 "上传一个远端已存在的文件(409)" 之间打转)。
+    private string? _rootId;
+    // 目录名缓存:父链上溯是**每个条目一次 GET**,不缓存会让对账变成 N×深度 次请求
+    private readonly Dictionary<string, string> _dirNameCache = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private CancellationTokenSource? _cts;
     private Task? _localLoop;
@@ -179,6 +185,14 @@ public sealed class SyncHost : IAsyncDisposable
     private async Task ReconcileCoreAsync(CancellationToken ct)
     {
         var spaceId = await ResolveSpaceIdAsync(ct).ConfigureAwait(false);
+        var syncParent = string.IsNullOrEmpty(_config.ParentId) ? null : _config.ParentId;
+        if (_rootId is null)
+        {
+            // 根目录 id = 同步起点那一层条目的 parent_id。空间为空时拿不到,
+            // 那时也没有任何需要在本地建目录的远端条目,不影响正确性。
+            var top = await _files.ListAsync(spaceId, syncParent, ct).ConfigureAwait(false);
+            _rootId = top.FirstOrDefault()?.parent_id;
+        }
         var remote = new Dictionary<string, EntryView>(StringComparer.OrdinalIgnoreCase);
         var parentOf = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
@@ -232,7 +246,7 @@ public sealed class SyncHost : IAsyncDisposable
             {
                 continue;
             }
-            await UploadAsync(rel, ct).ConfigureAwait(false);
+            await UploadAsync(rel, remoteHas ? remoteEntry : null, ct).ConfigureAwait(false);
             _ = known;
             _ = remoteEntry;
         }
@@ -346,7 +360,7 @@ public sealed class SyncHost : IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    private async Task UploadAsync(string rel, CancellationToken ct)
+    private async Task UploadAsync(string rel, EntryView? remoteEntry, CancellationToken ct)
     {
         var local = LocalOf(rel);
         var info = new FileInfo(LongPath.ToExtended(local));
@@ -368,19 +382,34 @@ public sealed class SyncHost : IAsyncDisposable
             TotalBytes = info.Length,
             Run = async (_, token) =>
             {
-                var res = await _files.UploadAsync(spaceId, parentId, Path.GetFileName(local), local, null, token)
-                    .ConfigureAwait(false);
-                SaveState(new EntryView
+                EntryView after;
+                if (remoteEntry is null)
                 {
-                    id = res.FileId,
-                    name = Path.GetFileName(local),
-                    is_dir = false,
-                    size = info.Length,
-                    version = res.Version,
-                    etag = "",
-                    updated_at = DateTimeOffset.UtcNow.ToString("O"),
-                }, rel, local);
-                Upsert(rel, SyncState.InSync, "", res.Version);
+                    // 远端没有同名文件:TUS 建任务(分片 + 断点续传)
+                    var res = await _files.UploadAsync(spaceId, parentId, Path.GetFileName(local), local, null, token)
+                        .ConfigureAwait(false);
+                    after = new EntryView
+                    {
+                        id = res.FileId,
+                        name = Path.GetFileName(local),
+                        is_dir = false,
+                        size = info.Length,
+                        version = res.Version,
+                        etag = "",
+                        updated_at = DateTimeOffset.UtcNow.ToString("O"),
+                    };
+                }
+                else
+                {
+                    // 远端已有同名文件(本地改动要传回去):必须走**覆盖**。
+                    // 用 TUS 建任务会被 409 name_conflict 拒掉(上传任务占名,ADR-5)——
+                    // 实测就是这样,导致"改本地已有文件"永远同步不出去。
+                    after = await _files.UploadOverwriteAsync(
+                        spaceId, rel, local, string.IsNullOrEmpty(remoteEntry.etag) ? null : remoteEntry.etag,
+                        token).ConfigureAwait(false);
+                }
+                SaveState(after, rel, local);
+                Upsert(rel, SyncState.InSync, "", after.version);
                 return info.Length;
             },
         });
@@ -426,13 +455,23 @@ public sealed class SyncHost : IAsyncDisposable
             return e.name; // 空间根的直接子项
         }
         var parts = new List<string> { e.name };
-        var pid = e.parent_id;
+        var parent = e.parent_id;
         var guard = 0;
-        while (!string.IsNullOrEmpty(pid) && pid != _config.ParentId && guard++ < 64)
+        // 停在**同步起点**就够:再往上就是空间根目录/配置里的父目录,它们的名字
+        // 不属于"相对同步根的路径"(多带一层会让本地与远端路径永不相等,见 _rootId 注释)
+        while (!string.IsNullOrEmpty(parent)
+               && !string.Equals(parent, _rootId, StringComparison.Ordinal)
+               && !string.Equals(parent, _config.ParentId, StringComparison.Ordinal)
+               && guard++ < 64)
         {
-            var p = await _files.GetEntryAsync(pid!, CancellationToken.None).ConfigureAwait(false);
-            parts.Insert(0, p.name);
-            pid = p.parent_id;
+            if (!_dirNameCache.TryGetValue(parent!, out var pname))
+            {
+                var pe = await _files.GetEntryAsync(parent!, CancellationToken.None).ConfigureAwait(false);
+                pname = pe.name;
+                _dirNameCache[parent!] = pname;
+            }
+            parts.Insert(0, pname);
+            parent = (await _files.GetEntryAsync(parent!, CancellationToken.None).ConfigureAwait(false)).parent_id;
         }
         return string.Join('/', parts);
     }

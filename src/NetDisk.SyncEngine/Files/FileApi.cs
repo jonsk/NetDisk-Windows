@@ -185,6 +185,56 @@ public sealed class FileApi
         return written;
     }
 
+    /// <summary>
+    /// **覆盖**已存在的远端文件(本地改动要传回去时必须走这条)。
+    ///
+    /// 为什么不能用 TUS 建任务:上传任务是"名字的预留者"(ADR-5),同目录同名会直接
+    /// 409 name_conflict —— 实测正是这样:本地改了已有文件,再走 TUS 建任务被拒,
+    /// 于是"改本地文件"这个最基本的动作同步不出去。
+    /// 覆盖走 WebDAV PUT + **If-Match**(6.6 的乐观锁落点):版本落后会得到 412,
+    /// 调用方据此走冲突流程,而不是静默把别人的修改盖掉。
+    /// 局限(MVP):MVP 的同步根就是空间根,所以这里直接用相对同步根的路径作为
+    /// WebDAV 路径;若将来支持"空间内子目录作为同步根",这里需要把父目录前缀补上。
+    /// </summary>
+    public async Task<EntryView> UploadOverwriteAsync(
+        string spaceId, string relativePath, string localPath, string? ifMatch, CancellationToken ct = default)
+    {
+        var path = $"/webdav/{Uri.EscapeDataString(spaceId)}/{relativePath}";
+        await using var stream = new FileStream(LongPath.ToExtended(localPath), FileMode.Open,
+            FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true);
+        using var content = new StreamContent(stream);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        using var resp = await _api.WebDavAsync("PUT", path, ifMatch, content, ct).ConfigureAwait(false);
+        // 201(新建)/204(覆盖)都算成功;之后按路径查一次详情拿新版本与 ETag
+        var dir = Path.GetDirectoryName(relativePath.Replace('/', Path.DirectorySeparatorChar));
+        var parentId = string.IsNullOrEmpty(dir) ? null : (string?)null; // MVP:同步根=空间根
+        var found = await FindByRelativePathAsync(spaceId, relativePath, ct).ConfigureAwait(false);
+        if (found is null)
+        {
+            throw new ApiException(resp.StatusCode, "overwrite_no_entry",
+                $"覆盖成功但按路径找不到该条目: {relativePath}(parent={parentId})");
+        }
+        return found;
+    }
+
+    /// <summary>按相对空间根的路径找条目(MVP:逐级列出定位)。</summary>
+    public async Task<EntryView?> FindByRelativePathAsync(
+        string spaceId, string relativePath, CancellationToken ct = default)
+    {
+        var parts = relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        string? parent = null;
+        EntryView? current = null;
+        foreach (var part in parts)
+        {
+            current = await FindByNameAsync(spaceId, parent, part, ct).ConfigureAwait(false);
+            if (current is null)
+            {
+                return null;
+            }
+            parent = current.id;
+        }
+        return current;
+    }
     /// <summary>上传一个本地文件(走 TUS,带断点续传语义)。</summary>
     public async Task<UploadResult> UploadAsync(
         string spaceId,

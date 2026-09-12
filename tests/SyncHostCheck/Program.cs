@@ -155,8 +155,11 @@ try
     var staging2 = Path.Combine(work, "remote-edit.txt");
     var contentRemote = "remote-edit-" + Guid.NewGuid().ToString("N")[..8];
     await File.WriteAllTextAsync(staging2, contentRemote);
-    var up2 = await files.UploadAsync(space.id, null, name1, staging2);
-    Check("远端已产生新版本", up2.Version >= 2, $"version={up2.Version}");
+    // "另一端改了这个文件"必须用**覆盖**(WebDAV PUT):用 TUS 建任务会被
+    // 409 name_conflict 拒掉 —— 上传任务是名字的预留者(ADR-5)
+    var before = (await files.FindByNameAsync(space.id, null, name1))!;
+    var after = await files.UploadOverwriteAsync(space.id, name1, staging2, before.etag);
+    Check("远端已产生新版本", after.version > before.version, $"before={before.version} after={after.version}");
 
     await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
     {
