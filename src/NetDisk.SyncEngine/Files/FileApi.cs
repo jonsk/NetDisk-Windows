@@ -1,4 +1,4 @@
-﻿// 文件读写通道(列表 / 详情 / 下载 / 上传)—— MVP 客户端接线的第一块。
+// 文件读写通道(列表 / 详情 / 下载 / 上传)—— MVP 客户端接线的第一块。
 //
 // 为什么放在 SyncEngine 而不是 Transport:
 //   下载要落盘,而落盘必须处理**长路径**(`\\?\` 前缀,见 Paths/LongPath)与
@@ -185,42 +185,15 @@ public sealed class FileApi
         return written;
     }
 
-    /// <summary>
-    /// **替换**已存在的远端文件(本地改动要传回去时必须走这条)。
-    ///
-    /// 为什么这么实现(MVP 的取舍,写清楚免得被误读):
-    ///   服务端**没有** Bearer 认证的"覆盖"入口 —— 契约里 `upload/create` 与
-    ///   `upload/simple` 都只有 {space_id,parent_id,name,size,hash},没有
-    ///   file_id/base_version;而 WebDAV PUT 虽然能覆盖,却走 Basic/账密换票
-    ///   (ADR-6),客户端**只持有 Bearer 令牌、不持有口令**(刻意的:口令不落盘),
-    ///   实测直接 `WebDAV 认证失败: 请提供 Basic 凭据`。
-    ///   所以 MVP 用 **先删后传**:DELETE 释放名字与引用,再 TUS 建任务上传。
-    ///
-    /// 代价(必须知道):远端会得到**新的 file id 与新版本号**(不是原地 +1),
-    /// 中间有一小段"文件不存在"的窗口。要根治应当**先补契约再实现**一个
-    /// 带 base_version 的覆盖入口(已登记为待办);在那之前,"改本地文件能传上去"
-    /// 比"版本号连续"更重要 —— 后者当前根本走不通。
-    /// </summary>
-    public async Task<EntryView> UploadReplacingAsync(
-        string spaceId, string remoteFileId, string? parentId, string name, string localPath,
-        IProgress<long>? progress = null, CancellationToken ct = default)
-    {
-        using (var del = await _api.SendRawAsync(HttpMethod.Delete,
-                   $"/api/v1/files/{Uri.EscapeDataString(remoteFileId)}",
-                   contentFactory: null, headers: null, idempotent: true, ct: ct).ConfigureAwait(false))
-        {
-            // 404 说明另一端已经删掉了:那正好,继续传
-            if (!del.IsSuccessStatusCode && del.StatusCode != System.Net.HttpStatusCode.NotFound)
-            {
-                var body = await del.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                throw new ApiException(del.StatusCode, "delete_before_replace_failed",
-                    $"替换前删除失败({(int)del.StatusCode}):{Truncate(body, 200)}");
-            }
-        }
+    // 这里原本有一个 UploadReplacingAsync(先 DELETE 再 TUS 建任务),已删除。
+    // 删除理由(留档,别再写回来):它能让"本地改动传回去"看起来能用,代价是远端
+    // 拿到**新的 file id、版本号回到 1**。这不只是不优雅 —— 客户端的冲突判据是
+    // "远端 version > 本地已知 version",版本号一倒退该判据**永远不成立**,
+    // 于是另一端的修改会被本地版本静默覆盖(实测:双端同改后本地既不生成冲突副本、
+    // 用户也看不到任何提示)。根治办法是把"覆盖意图"补进契约并让服务端原地覆盖:
+    //   upload/create 增加 allow_overwrite → TUS 定稿时原地生成新版本(同一 file id)。
+    // 现已落地(契约 + 迁移 00013 + 服务端 + 客户端 flag),覆盖走 UploadAsync(..., allowOverwrite: true)。
 
-        var res = await UploadAsync(spaceId, parentId, name, localPath, progress, allowOverwrite: false, ct).ConfigureAwait(false);
-        return await GetEntryAsync(res.FileId, ct).ConfigureAwait(false);
-    }
     /// <summary>按相对空间根的路径找条目(MVP:逐级列出定位)。</summary>
     public async Task<EntryView?> FindByRelativePathAsync(
         string spaceId, string relativePath, CancellationToken ct = default)

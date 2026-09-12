@@ -1,4 +1,4 @@
-﻿// SyncHostCheck —— 客户端接线的**端到端**检查器(零 NuGet)。
+// SyncHostCheck —— 客户端接线的**端到端**检查器(零 NuGet)。
 //
 // 与其它检查器的区别:它不测纯函数,而是把**真实**的登录/令牌/传输/状态库/对账
 // 全部接起来,打**真实服务端**(默认本机 8080,可用 NETDISK_E2E_BASE 指向真机),
@@ -155,26 +155,26 @@ try
     var staging2 = Path.Combine(work, "remote-edit.txt");
     var contentRemote = "remote-edit-" + Guid.NewGuid().ToString("N")[..8];
     await File.WriteAllTextAsync(staging2, contentRemote);
-    // "另一端改了这个文件"必须用**覆盖**(WebDAV PUT):用 TUS 建任务会被
-    // 409 name_conflict 拒掉 —— 上传任务是名字的预留者(ADR-5)
+    // "另一端改了这个文件" = 同名**原地覆盖**。这里刻意不再用"先删后传":
+    // 那会让远端拿到新 file id、版本号回到 1,于是"远端 version > 本地已知 version"
+    // 这条冲突判据永远不成立 —— 表现就是另一端的修改被本地静默覆盖。
+    // 覆盖意图现在由契约的 allow_overwrite 承载(TUS 定稿时原地生成新版本)。
     var before = (await files.FindByNameAsync(space.id, null, name1))!;
-    var after = await files.UploadReplacingAsync(space.id, before.id, null, name1, staging2);
-    // ⚠ **已知缺陷(故意让断言失败,不允许掩盖)**:MVP 的"替换"是**先删后传**
-    // (服务端没有 Bearer 认证的覆盖入口;WebDAV 要 Basic 而客户端不持口令),
-    // 于是远端拿到的是**新 file id + 版本号回到 1**。版本号一旦倒退,
-    // "远端版本 > 已知版本"这条冲突判据就永远不成立 → **另一端的修改会被本地版本静默覆盖**。
-    // 所以这里不断言"版本递增"(那是在为错误的实现背书),而是断言**版本连续性不成立**,
-    // 让这条缺陷在 CI 里一直可见。根治要在契约里补一个带 base_version 的覆盖入口。
-    Check("已知缺陷:MVP 替换导致版本号倒退(冲突判据失效)", after.version <= before.version,
-        $"before={before.version} after={after.version}(期望 <=,以暴露缺陷)");
+    await files.UploadAsync(space.id, null, name1, staging2, allowOverwrite: true);
+    var after = (await files.FindByNameAsync(space.id, null, name1))!;
+    // 覆盖必须**原地**发生。这两条是 ④ 的前提:身份不连续 / 版本倒退时,
+    // 冲突检测在客户端侧是不可能正确工作的。
+    Check("远端覆盖后 file id 不变(身份连续)", after.id == before.id,
+        $"before={before.id} after={after.id}");
+    Check("远端覆盖后版本号递增(冲突判据的基础)", after.version > before.version,
+        $"before={before.version} after={after.version}");
 
     await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
     {
         await host.StartAsync();
         await host.ReconcileAsync();
         var copies = Directory.GetFiles(root, "*_conflict_*").Select(Path.GetFileName).ToArray();
-        // 这条**必须失败**:上面版本号倒退导致冲突判据失效,所以本地改动会上传并覆盖远端改动。
-        // 保留失败断言是为了让"会丢另一端修改"这件事在任何一次 CI 里都看得见。
+        // 两端都改过:本地这一版必须被保留成冲突副本(而不是被远端静默覆盖掉)。
         Check("本地生成了冲突副本(本地改动没被丢弃)", copies.Length > 0,
             copies.Length > 0 ? string.Join(',', copies) : "没有副本");
         if (copies.Length > 0)
@@ -187,7 +187,9 @@ try
                 canonical[..Math.Min(24, canonical.Length)]);
         }
         var st = host.Status.FirstOrDefault(s => s.RelativePath == name1);
-        Check("状态列表里标注了冲突", st?.State is SyncState.Conflict or SyncState.InSync,
+        // 原来这里写成 `Conflict or InSync`(等于放行任何结果,断言没有信息量)。
+        // 冲突已能产生副本,就把状态收紧成**必须**是 Conflict。
+        Check("状态列表里该文件标注为冲突", st?.State == SyncState.Conflict,
             $"state={st?.State.ToString() ?? "(无)"} msg={st?.Message}");
     }
 

@@ -1,4 +1,4 @@
-﻿// 同步宿主(SyncHost)—— MVP 接线的核心:把"已经写好但一直没接线"的引擎跑起来。
+// 同步宿主(SyncHost)—— MVP 接线的核心:把"已经写好但一直没接线"的引擎跑起来。
 //
 // 在此之前:登录/监听/状态机/账本/冲突裁决/传输队列**全部只是一个库 + 一堆检查器**,
 // App 里连一个都没实例化(用户装完 MSI 只能看到团队空间页)。这个类就是那条线。
@@ -210,7 +210,14 @@ public sealed class SyncHost : IAsyncDisposable
                 continue;
             }
             remote[rel] = e;
-            Upsert(rel, SyncState.InSync, "", e.version);
+            // 冲突标记是**粘性**的:每一轮对账开头都会把远端条目无脑写成 InSync,
+            // 而冲突副本刚生成、下一轮(自己的 SSE 事件/账本触发的重新对账)就把它抹掉 ——
+            // 表现是徽标闪一下就不见了,用户根本不知道发生过冲突。
+            // 版本判据用的是 sync_state 表(KnownVersion),不依赖这里的显示状态,所以跳过是安全的。
+            if (StateOf(rel) != SyncState.Conflict)
+            {
+                Upsert(rel, SyncState.InSync, "", e.version);
+            }
         }
 
         Notice?.Invoke($"对账:远端 {remote.Count} 个文件,进入下载阶段");
@@ -230,10 +237,15 @@ public sealed class SyncHost : IAsyncDisposable
                 if (LocalLooksChanged(rel))
                 {
                     var conflictPath = MakeConflictCopy(rel);
-                    Upsert(rel, SyncState.Conflict, $"两端都改了;本地版本已保留为 {Path.GetFileName(conflictPath)}", entry.version);
-                    Notice?.Invoke($"冲突:已保留本地副本 {Path.GetFileName(conflictPath)}");
+                    var conflictName = Path.GetFileName(conflictPath);
+                    await DownloadAsync(entry, rel, ct,
+                        (SyncState.Conflict, $"两端都改了;本地版本已保留为 {conflictName}")).ConfigureAwait(false);
+                    Notice?.Invoke($"冲突:已保留本地副本 {conflictName}");
                 }
-                await DownloadAsync(entry, rel, ct).ConfigureAwait(false);
+                else
+                {
+                    await DownloadAsync(entry, rel, ct).ConfigureAwait(false);
+                }
             }
         }
 
@@ -257,8 +269,22 @@ public sealed class SyncHost : IAsyncDisposable
         // 传输统一在这里排空:入队是"计划",排空才是"执行完" ——
         // 排空之后状态才是可信的(否则 UI 会看到一堆 Pending 然后瞬间跳 InSync)。
         Notice?.Invoke("对账:排空队列…");
-        await _queue.DrainAsync(ct).ConfigureAwait(false);
-        Notice?.Invoke("对账:完成");
+        // 排空**必须有上限**:一条卡住的传输不该让整轮对账(乃至整个同步)永远停摆 ——
+        // 现象是用户只看到「上传中」永远不动,而日志里什么都没有。
+        // 超时后如实报出「待处理/在跑」条数并继续(下一轮对账会再试)。
+        using (var drainCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            drainCts.CancelAfter(TimeSpan.FromSeconds(60));
+            try
+            {
+                await _queue.DrainAsync(drainCts.Token).ConfigureAwait(false);
+                Notice?.Invoke("对账:完成");
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                Notice?.Invoke($"对账:排空队列超时(待处理={_queue.PendingCount} 在跑={_queue.ActiveCount});下一轮再试");
+            }
+        }
     }
 
     // ---------------------------------------------------------------- 本地
@@ -343,7 +369,17 @@ public sealed class SyncHost : IAsyncDisposable
 
     // ---------------------------------------------------------------- 传输
 
-    private Task DownloadAsync(EntryView entry, string rel, CancellationToken ct)
+    /// <summary>
+    /// 下载一个远端条目到本地。
+    ///
+    /// <paramref name="finalState"/> 用于"下载完成后该显示成什么状态" —— 默认 InSync,
+    /// 但**冲突**场景必须传 Conflict:那一轮里我们先做了冲突副本、再把远端版本拉回来,
+    /// 如果这里照旧写 InSync,刚标好的「冲突」会被静默抹掉(实测:副本文件都在了,
+    /// UI 上却显示「已同步」,用户完全不知道发生过冲突)。
+    /// 注意入队时仍先标 PendingDownload —— 那一刻确实在下载,状态是诚实的。
+    /// </summary>
+    private Task DownloadAsync(EntryView entry, string rel, CancellationToken ct,
+        (SyncState State, string Message)? finalState = null)
     {
         var local = LocalOf(rel);
         Upsert(rel, SyncState.PendingDownload, "", entry.version);
@@ -357,7 +393,14 @@ public sealed class SyncHost : IAsyncDisposable
             {
                 var n = await _files.DownloadAsync(entry.id, local, token).ConfigureAwait(false);
                 RecordState(entry, rel, local);
-                Upsert(rel, SyncState.InSync, "", entry.version);
+                if (finalState is { } f)
+                {
+                    Upsert(rel, f.State, f.Message, entry.version);
+                }
+                else
+                {
+                    Upsert(rel, SyncState.InSync, "", entry.version);
+                }
                 return n;
             },
         });
@@ -496,6 +539,16 @@ public sealed class SyncHost : IAsyncDisposable
         var target = Path.Combine(Path.GetDirectoryName(local)!, conflictName);
         File.Move(LongPath.ToExtended(local), LongPath.ToExtended(target), overwrite: true);
         return target;
+    }
+
+    /// <summary>读取某条路径当前的显示状态(没有则 null)。用于"冲突标记要粘住"的判断。</summary>
+    private SyncState? StateOf(string rel)
+    {
+        lock (_gate)
+        {
+            var i = _status.FindIndex(s => string.Equals(s.RelativePath, rel, StringComparison.OrdinalIgnoreCase));
+            return i >= 0 ? _status[i].State : null;
+        }
     }
 
     private void Upsert(string rel, SyncState state, string message, long version)
