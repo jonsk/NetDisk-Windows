@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    OnboardingCheck —— DE-D-15 检查器(零额外 NuGet)。
+    ①三选各自的**范围/节流**正确(结构模式默认并发 3、全量首次降到 1);
+    ②容量预估按所选范围(限定子树不能按全库报);
+    ③同步根预检(深度/最长路径,与服务端 6.4 同源);
+    ④**结构模式 = 只读浏览**:只落目录 + 一份 `_未下载说明.txt`,
+      **绝不出现与远端同名的 0 字节文件**(那会被用户当成"文件损坏");
+    ⑤落骨架幂等、且**不碰**本地既有真实文件(切模式不是数据丢失)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Onboarding</RootNamespace>
+    <AssemblyName>OnboardingCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
