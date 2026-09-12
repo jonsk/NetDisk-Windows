@@ -238,6 +238,57 @@ try
         Check("同名远端条目只有一条(没有因重启重复上传)", dupes.Length == 1,
             $"count={dupes.Length}");
     }
+
+    // ------------------------------------------------ ⑥ 本地改名(实测当前行为,含缺口)
+    // 目标 ③ 里有一条"改名经 FileId 不重传"。**当前实现没有做到** —— 本机扫描只按
+    // 相对路径记账(ScanLocal → KnownVersion(rel)/remote[rel]),所以"改名"看起来就是
+    // 一个**新文件**:会被整份重新上传,旧名字在服务端仍然留着(等于多一份)。
+    // 这一节不假装通过,而是把**真实行为**摆出来当证据,并把它登记为缺口。
+    Console.WriteLine();
+    Console.WriteLine("— ⑥ 本地改名(file-rename 经 FileId 复用:当前**未实现**)");
+    var nameRenamed = $"sync-check-{DateTime.Now:HHmmss}-renamed.txt";
+    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
+    {
+        await host.StartAsync();
+        await host.ReconcileAsync();
+
+        // 先确保 name2 已在两端一致(③ 建的),再在本地改名
+        var before2 = await files.FindByNameAsync(space.id, null, name2);
+        Check("改名前:该文件在服务端存在(⑥ 的前提)", before2 is not null);
+        var localOld = Path.Combine(root, name2);
+        var localNew = Path.Combine(root, nameRenamed);
+        File.Move(localOld, localNew, overwrite: true);
+
+        await host.ReconcileAsync();
+
+        var afterNew = await files.FindByNameAsync(space.id, null, nameRenamed);
+        var afterOld = await files.FindByNameAsync(space.id, null, name2);
+        var localNewText = await File.ReadAllTextAsync(localNew);
+        // 把服务端那份**下载回来**比对(不只看名字存在:名字在、内容错也是缺陷)
+        string? downloaded = null;
+        if (afterNew is not null)
+        {
+            var verifyPath = Path.Combine(work, "verify-rename.txt");
+            await files.DownloadAsync(afterNew.id, verifyPath);
+            downloaded = await File.ReadAllTextAsync(verifyPath);
+        }
+
+        // 数据安全必须成立:改名的文件在两端都在、内容正确(这条是真断言)
+        Check("改名后新名字出现在服务端且内容一致",
+            afterNew is not null && downloaded == localNewText,
+            afterNew is null ? "服务端没有新名字" : "内容不一致");
+        Check("本地改名后文件仍在本地(没被删)",
+            File.Exists(localNew) && localNewText.Length > 0);
+
+        // 下面是**缺口证据**(打印事实,不做假断言):是否复用了 file id、旧条目是否残留
+        Console.WriteLine($"    缺口证据:旧名字 {name2} 在服务端{(afterOld is null ? "已消失" : "**仍然存在**(残留一份)")};" +
+                          $"新名字 file id {(afterNew is not null && before2 is not null && afterNew.id == before2.id ? "== 旧 id(复用)" : "!= 旧 id(重新建了一份)")}");
+        if (afterOld is not null)
+        {
+            Console.WriteLine("    缺口结论:本地改名 = 整份重新上传 + 服务端多一份 → 未实现「改名经 FileId 不重传」。" +
+                              "根治需要:本机文件身份(DE-D-11 FileIdInfo)匹配 sync_state.file_id → 调 `POST /api/v1/files/{id}/move` 改名,而不是新建。");
+        }
+    }
 }
 finally
 {
