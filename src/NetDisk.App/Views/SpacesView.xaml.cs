@@ -18,7 +18,7 @@ using NetDisk.Transport;
 namespace NetDisk.App.Views;
 
 /// <summary>团队空间协作视图(与 H5 同一组接口)。</summary>
-public partial class SpacesView : UserControl
+public partial class SpacesView : System.Windows.Controls.UserControl
 {
     private readonly SpaceCollabClient? _client;
     private SpaceView? _selected;
@@ -57,7 +57,7 @@ public partial class SpacesView : UserControl
     {
         var text = ex is ApiException api ? SpaceCollabClient.DescribeFailure(api) : ex.Message;
         Status(text);
-        MessageBox.Show(text, "操作失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+        System.Windows.MessageBox.Show(text, "操作失败", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private async Task ReloadAsync()

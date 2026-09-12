@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    NotifyCheck —— DE-D-18 检查器(零额外 NuGet)。
+    ①四类通知都可触发(验收口径:同步完成 / 冲突 / 被移出空间 / 配额预警);
+    ②"同步完成"**合并窗口**(窗口内折成一条 —— 否则几千个文件就是几千个气泡,
+      用户会直接关掉通知,把真正重要的几条也一起关掉);
+    ③配额**滞回**(过 80% 报一次,必须回落到 70% 以下才重新武装,否则阈值抖动会刷屏);
+    ④通知**内容**必须讲清用户最关心的两件事:被移出空间时"本地文件不会删除"、
+      冲突时"需要你选保留哪边";
+    ⑤开机自启:真实注册表往返(在临时子键下),且**路径带引号**;
+    ⑥托盘适配器只是渲染层(不含"该不该通知"的判断),逻辑在 SyncEngine 里。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Notify</RootNamespace>
+    <AssemblyName>NotifyCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>

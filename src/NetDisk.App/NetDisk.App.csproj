@@ -11,6 +11,12 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <!-- 托盘气泡(NotifyIcon)来自 Windows Forms;depsguard 规则②:只有 App 可开 UI 框架 -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- 关掉 WinForms 的**隐式 using**:否则它与 WPF 的隐式 using 撞在一起,
+         `Application`/`UserControl` 等类型全部变成"不明确的引用"(编译器只报歧义,
+         不告诉你是哪来的)。托盘那个文件自己显式 `using System.Windows.Forms;` 即可。 -->
+    <DisableImplicitNamespaceImports_WindowsForms>true</DisableImplicitNamespaceImports_WindowsForms>
     <RootNamespace>NetDisk.App</RootNamespace>
     <AssemblyName>NetDisk.App</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
