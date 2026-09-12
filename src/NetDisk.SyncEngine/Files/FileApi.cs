@@ -186,37 +186,41 @@ public sealed class FileApi
     }
 
     /// <summary>
-    /// **覆盖**已存在的远端文件(本地改动要传回去时必须走这条)。
+    /// **替换**已存在的远端文件(本地改动要传回去时必须走这条)。
     ///
-    /// 为什么不能用 TUS 建任务:上传任务是"名字的预留者"(ADR-5),同目录同名会直接
-    /// 409 name_conflict —— 实测正是这样:本地改了已有文件,再走 TUS 建任务被拒,
-    /// 于是"改本地文件"这个最基本的动作同步不出去。
-    /// 覆盖走 WebDAV PUT + **If-Match**(6.6 的乐观锁落点):版本落后会得到 412,
-    /// 调用方据此走冲突流程,而不是静默把别人的修改盖掉。
-    /// 局限(MVP):MVP 的同步根就是空间根,所以这里直接用相对同步根的路径作为
-    /// WebDAV 路径;若将来支持"空间内子目录作为同步根",这里需要把父目录前缀补上。
+    /// 为什么这么实现(MVP 的取舍,写清楚免得被误读):
+    ///   服务端**没有** Bearer 认证的"覆盖"入口 —— 契约里 `upload/create` 与
+    ///   `upload/simple` 都只有 {space_id,parent_id,name,size,hash},没有
+    ///   file_id/base_version;而 WebDAV PUT 虽然能覆盖,却走 Basic/账密换票
+    ///   (ADR-6),客户端**只持有 Bearer 令牌、不持有口令**(刻意的:口令不落盘),
+    ///   实测直接 `WebDAV 认证失败: 请提供 Basic 凭据`。
+    ///   所以 MVP 用 **先删后传**:DELETE 释放名字与引用,再 TUS 建任务上传。
+    ///
+    /// 代价(必须知道):远端会得到**新的 file id 与新版本号**(不是原地 +1),
+    /// 中间有一小段"文件不存在"的窗口。要根治应当**先补契约再实现**一个
+    /// 带 base_version 的覆盖入口(已登记为待办);在那之前,"改本地文件能传上去"
+    /// 比"版本号连续"更重要 —— 后者当前根本走不通。
     /// </summary>
-    public async Task<EntryView> UploadOverwriteAsync(
-        string spaceId, string relativePath, string localPath, string? ifMatch, CancellationToken ct = default)
+    public async Task<EntryView> UploadReplacingAsync(
+        string spaceId, string remoteFileId, string? parentId, string name, string localPath,
+        IProgress<long>? progress = null, CancellationToken ct = default)
     {
-        var path = $"/webdav/{Uri.EscapeDataString(spaceId)}/{relativePath}";
-        await using var stream = new FileStream(LongPath.ToExtended(localPath), FileMode.Open,
-            FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true);
-        using var content = new StreamContent(stream);
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-        using var resp = await _api.WebDavAsync("PUT", path, ifMatch, content, ct).ConfigureAwait(false);
-        // 201(新建)/204(覆盖)都算成功;之后按路径查一次详情拿新版本与 ETag
-        var dir = Path.GetDirectoryName(relativePath.Replace('/', Path.DirectorySeparatorChar));
-        var parentId = string.IsNullOrEmpty(dir) ? null : (string?)null; // MVP:同步根=空间根
-        var found = await FindByRelativePathAsync(spaceId, relativePath, ct).ConfigureAwait(false);
-        if (found is null)
+        using (var del = await _api.SendRawAsync(HttpMethod.Delete,
+                   $"/api/v1/files/{Uri.EscapeDataString(remoteFileId)}",
+                   contentFactory: null, headers: null, idempotent: true, ct: ct).ConfigureAwait(false))
         {
-            throw new ApiException(resp.StatusCode, "overwrite_no_entry",
-                $"覆盖成功但按路径找不到该条目: {relativePath}(parent={parentId})");
+            // 404 说明另一端已经删掉了:那正好,继续传
+            if (!del.IsSuccessStatusCode && del.StatusCode != System.Net.HttpStatusCode.NotFound)
+            {
+                var body = await del.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                throw new ApiException(del.StatusCode, "delete_before_replace_failed",
+                    $"替换前删除失败({(int)del.StatusCode}):{Truncate(body, 200)}");
+            }
         }
-        return found;
-    }
 
+        var res = await UploadAsync(spaceId, parentId, name, localPath, progress, ct).ConfigureAwait(false);
+        return await GetEntryAsync(res.FileId, ct).ConfigureAwait(false);
+    }
     /// <summary>按相对空间根的路径找条目(MVP:逐级列出定位)。</summary>
     public async Task<EntryView?> FindByRelativePathAsync(
         string spaceId, string relativePath, CancellationToken ct = default)

@@ -404,9 +404,9 @@ public sealed class SyncHost : IAsyncDisposable
                     // 远端已有同名文件(本地改动要传回去):必须走**覆盖**。
                     // 用 TUS 建任务会被 409 name_conflict 拒掉(上传任务占名,ADR-5)——
                     // 实测就是这样,导致"改本地已有文件"永远同步不出去。
-                    after = await _files.UploadOverwriteAsync(
-                        spaceId, rel, local, string.IsNullOrEmpty(remoteEntry.etag) ? null : remoteEntry.etag,
-                        token).ConfigureAwait(false);
+                    after = await _files.UploadReplacingAsync(
+                        spaceId, remoteEntry.id, parentId, Path.GetFileName(local), local, null, token)
+                        .ConfigureAwait(false);
                 }
                 SaveState(after, rel, local);
                 Upsert(rel, SyncState.InSync, "", after.version);

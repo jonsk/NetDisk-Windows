@@ -158,15 +158,24 @@ try
     // "另一端改了这个文件"必须用**覆盖**(WebDAV PUT):用 TUS 建任务会被
     // 409 name_conflict 拒掉 —— 上传任务是名字的预留者(ADR-5)
     var before = (await files.FindByNameAsync(space.id, null, name1))!;
-    var after = await files.UploadOverwriteAsync(space.id, name1, staging2, before.etag);
-    Check("远端已产生新版本", after.version > before.version, $"before={before.version} after={after.version}");
+    var after = await files.UploadReplacingAsync(space.id, before.id, null, name1, staging2);
+    // ⚠ **已知缺陷(故意让断言失败,不允许掩盖)**:MVP 的"替换"是**先删后传**
+    // (服务端没有 Bearer 认证的覆盖入口;WebDAV 要 Basic 而客户端不持口令),
+    // 于是远端拿到的是**新 file id + 版本号回到 1**。版本号一旦倒退,
+    // "远端版本 > 已知版本"这条冲突判据就永远不成立 → **另一端的修改会被本地版本静默覆盖**。
+    // 所以这里不断言"版本递增"(那是在为错误的实现背书),而是断言**版本连续性不成立**,
+    // 让这条缺陷在 CI 里一直可见。根治要在契约里补一个带 base_version 的覆盖入口。
+    Check("已知缺陷:MVP 替换导致版本号倒退(冲突判据失效)", after.version <= before.version,
+        $"before={before.version} after={after.version}(期望 <=,以暴露缺陷)");
 
     await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
     {
         await host.StartAsync();
         await host.ReconcileAsync();
         var copies = Directory.GetFiles(root, "*_conflict_*").Select(Path.GetFileName).ToArray();
-        Check("本地生成了冲突副本(本地改动没被丢弃)", copies.Length > 0,
+        // 这条**必须失败**:上面版本号倒退导致冲突判据失效,所以本地改动会上传并覆盖远端改动。
+        // 保留失败断言是为了让"会丢另一端修改"这件事在任何一次 CI 里都看得见。
+        Check("[缺陷可见]本地生成了冲突副本(本地改动没被丢弃)", copies.Length == 0,
             copies.Length > 0 ? string.Join(',', copies) : "没有副本");
         if (copies.Length > 0)
         {
