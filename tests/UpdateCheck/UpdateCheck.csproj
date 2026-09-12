@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    UpdateCheck —— DE-D-19 检查器(零额外 NuGet)。
+    ①升级序列的**顺序**(暂停 → 排空 → 迁移 → 重启)与每一步的失败路径;
+    ②"排空"是**等**出来的(在飞任务必须跑完),超时则**放弃升级**而不是杀任务;
+    ③任何失败都必须**恢复同步**(用户不该面对一个卡住的客户端)+ 尝试回滚;
+    ④更新器命令行:MSI 路径带引号、`/qn` 静默、可要求装完把客户端拉起来。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Update</RootNamespace>
+    <AssemblyName>UpdateCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
