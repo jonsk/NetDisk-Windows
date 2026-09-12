@@ -93,6 +93,55 @@ public sealed class FileApi
     public Task<EntryView> GetEntryAsync(string fileId, CancellationToken ct = default) =>
         _api.GetAsync<EntryView>($"/api/v1/files/{Uri.EscapeDataString(fileId)}", ct);
 
+    /// <summary>列出账号可见的空间(MVP 用它挑出个人空间)。</summary>
+    public Task<SpaceList> ListSpacesAsync(CancellationToken ct = default) =>
+        _api.GetAsync<SpaceList>("/api/v1/spaces", ct);
+
+    /// <summary>
+    /// 建目录。**走 WebDAV MKCOL**,而不是某个 JSON 端点:
+    /// 服务端没有"建目录"的 REST 接口(`/api/v1/files` 只有 GET,目录创建属于
+    /// WebDAV 能力集),契约里也是如此。用错入口会 404/405,而不是"看起来也行"。
+    /// </summary>
+    public async Task<EntryView> CreateDirectoryAsync(
+        string spaceId, string? parentId, string name, CancellationToken ct = default)
+    {
+        // WebDAV 路径按 <space_id>/<相对路径> 组织;MVP 只用到"某一层之下"这一种形态,
+        // 所以由调用方保证 name 不含分隔符(带分隔符的层级创建由 EnsureParentDir 逐级做)
+        var prefix = string.IsNullOrEmpty(parentId) ? "" : $"{parentId}/";
+        var path = $"/webdav/{Uri.EscapeDataString(spaceId)}/{prefix}{Uri.EscapeDataString(name)}";
+        using var resp = await _api.WebDavAsync("MKCOL", path, null, null, ct).ConfigureAwait(false);
+        // MKCOL 成功是 201 Created(201 而非 200/204);已存在是 405,这里当成"已存在"处理
+        var id = resp.Headers.TryGetValues("X-File-Id", out var vals) ? vals.FirstOrDefault() : null;
+        if (!string.IsNullOrEmpty(id))
+        {
+            return await GetEntryAsync(id!, ct).ConfigureAwait(false);
+        }
+        // 服务端未回 X-File-Id 时,回落到按名字查父目录列表
+        foreach (var e in await ListAsync(spaceId, parentId, ct).ConfigureAwait(false))
+        {
+            if (e.is_dir && string.Equals(e.name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return e;
+            }
+        }
+        throw new ApiException(resp.StatusCode, "mkdir_no_id",
+            $"建目录成功但没有拿到目录 id: {path}");
+    }
+
+    /// <summary>按名字在指定父目录下找一个条目(MVP:目录去重靠它)。</summary>
+    public async Task<EntryView?> FindByNameAsync(
+        string spaceId, string? parentId, string name, CancellationToken ct = default)
+    {
+        foreach (var e in await ListAsync(spaceId, parentId, ct).ConfigureAwait(false))
+        {
+            if (string.Equals(e.name, name, StringComparison.Ordinal))
+            {
+                return e;
+            }
+        }
+        return null;
+    }
+
     /// <summary>
     /// 下载到本地路径(流式,不整文件进内存)。
     /// 返回实际写入的字节数;父目录不存在会自动创建。
