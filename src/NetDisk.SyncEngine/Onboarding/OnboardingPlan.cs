@@ -195,9 +195,11 @@ public sealed class SkeletonBuilder
         foreach (var entry in tree.Where(e => e.IsDirectory))
         {
             var full = CombineUnderRoot(plan.RootPath, entry.RelativePath);
-            if (!Directory.Exists(full))
+            // \\?\(DE-D-16):骨架里的深层目录同样可能超 MAX_PATH
+            var extended = Paths.LongPath.ToExtended(full);
+            if (!Directory.Exists(extended))
             {
-                Directory.CreateDirectory(full);
+                Directory.CreateDirectory(extended);
                 created++;
             }
         }

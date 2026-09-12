@@ -50,7 +50,9 @@ public sealed class DirectoryScanner
             ReturnSpecialDirectories = false,
         };
 
-        foreach (var info in new DirectoryInfo(path).EnumerateFileSystemInfos("*", options))
+        // 走 \\?\ 前缀(DE-D-16):单名可到 240 字节,叠加目录层级很容易超 MAX_PATH ——
+        // 不加前缀的表现是「文件明明在服务端、本地却看不到」,而且报错毫无提示性。
+        foreach (var info in new DirectoryInfo(Paths.LongPath.ToExtended(path)).EnumerateFileSystemInfos("*", options))
         {
             if (list.Count >= MaxEntries)
             {
@@ -59,7 +61,8 @@ public sealed class DirectoryScanner
             // 只读元数据:Length / LastWriteTimeUtc / Attributes 都来自一次 stat,
             // **不打开文件**。这里若出现 FileStream/ReadAllBytes,机械规则会拦住。
             list.Add(new ScannedEntry(
-                info.FullName,
+                // 状态库/UI 存的是**可读路径**(不带 \\?\);要调文件 API 时再加前缀
+                Paths.LongPath.ForDisplay(info.FullName),
                 (info.Attributes & FileAttributes.Directory) != 0,
                 info is FileInfo f ? f.Length : 0,
                 new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero),

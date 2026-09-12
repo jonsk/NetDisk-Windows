@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    LongPathCheck —— DE-D-16 检查器(零额外 NuGet)。
+    ①清单声明 longPathAware(机械断言:解析 app.manifest 的 XML);
+    ②路径统一 `\\?\(含"先规范化再加前缀"、UNC、幂等、展示还原)**并做真实 IO 验证**;
+    ③本地名字兜底断言:非法字符/保留名/尾点空格/超长/与服务端共享规则不一致 → 抛错;
+    ④**禁止静默改名** —— 结构上没有 sanitize/rename 能力(反射断言)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.LongPath</RootNamespace>
+    <AssemblyName>LongPathCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
