@@ -4,21 +4,68 @@
     NetDisk.Setup —— WiX MSI(R-25:工具版本、扩展、SDK **三处都钉 6.0.2**;
     禁止 `dotnet tool update` 全局升级 wix)。
 
-    R-26 的 perUser + MajorUpgrade 在 Product.wxs 里;完整签名/updater 接线见
-    DE-D-20 与 `Doc/WiX-配置指南.md`。
-
-    本工程在 DE-D-01 只求"能被 solution build 编出来"(证明工具链就位),
-    MSI 的真实文件清单要等 App 有可发布产物后才生成。
+    DE-D-20 起本工程做三件事:
+      ①**先发布、再打包**(顺序不可颠倒):MSI 载荷是 `publish\**`,`dotnet build`
+        会自动先跑一次自包含发布。踩过的同类坑:先 go build 再拷前端 → "编出来的
+        是上一版,而日志一路绿灯";打包陈旧产物是同一个错误的另一种形态。
+      ②**抑制三条 per-machine 前提的 ICE**(ICE38/ICE64/ICE91),而抑制被 R-26 的
+        机械检查盯着(见 Product.wxs 顶部说明)。
+      ③**签名钩子**:配了证书指纹($(SignCertThumbprint))就签名;没配则**显式打印
+        "产物未签名"** —— 不静默跳过。没有证书时 SmartScreen 会告警,而验收里
+        "有证书时告警消失"那一半的前提必须让日志说清楚,免得有人以为签过了。
   -->
   <PropertyGroup>
     <OutputName>NetDisk</OutputName>
     <OutputType>Package</OutputType>
     <!-- 版本与 App 一致(ADR-3:桌面制品版本独立递增,不随仓库 tag) -->
     <DefineConstants>ProductVersion=1.0.0</DefineConstants>
+
+    <!-- perUser-only 包(R-26)按官方建议抑制这三条 per-machine 前提的 ICE -->
+    <!--
+      ICE60:自包含产物里有些 DLL/EXE 带版本资源但没有 Language 列。该列只在**多语言**
+      安装里参与"按语言选文件",本项目是单语言包(而且 `Files` 集合并不支持逐文件给
+      Language),所以按官方建议抑制 —— 与 ICE38/64/91 一样,抑制理由写在 Product.wxs 里。
+    -->
+    <SuppressIces>ICE38;ICE60;ICE64;ICE91</SuppressIces>
+
+    <!-- 打包前自动发布(设 false 可跳过,仅用于快速迭代;产物缺失时打包会直接失败) -->
+    <PublishBeforePackaging Condition="'$(PublishBeforePackaging)' == ''">true</PublishBeforePackaging>
+
+    <!-- 代码签名:证书指纹来自环境变量(证书不进仓库) -->
+    <SignCertThumbprint Condition="'$(SignCertThumbprint)' == ''">$(NETDISK_SIGN_CERT_THUMBPRINT)</SignCertThumbprint>
+    <SignTimestampUrl Condition="'$(SignTimestampUrl)' == ''">http://timestamp.digicert.com</SignTimestampUrl>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
   </ItemGroup>
+
+  <!-- 1 先发布、再打包 -->
+  <Target Name="PublishAppBeforePackaging" BeforeTargets="BeforeBuild"
+          Condition="'$(PublishBeforePackaging)' == 'true'">
+    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)..\NetDisk.App\NetDisk.App.csproj&quot; -c $(Configuration) -r win-x64 --self-contained true -o &quot;$(MSBuildThisFileDirectory)publish&quot; --nologo"
+          StandardOutputImportance="low" />
+  </Target>
+
+  <!-- 载荷自检:发布产物必须在,且必须含主程序(否则会打出一个空壳 MSI 而日志全绿) -->
+  <Target Name="VerifyPayload" BeforeTargets="BeforeBuild" DependsOnTargets="PublishAppBeforePackaging">
+    <Error Condition="!Exists('$(MSBuildThisFileDirectory)publish\NetDisk.App.exe')"
+           Text="打包前找不到 publish\NetDisk.App.exe —— 发布产物缺失(或发布失败)。拒绝打一个空壳 MSI。" />
+  </Target>
+
+  <!--
+    3 签名钩子(有证书才签;没证书**显式告警**,不静默跳过)。
+    signtool 来自 Windows SDK;SHA256 + 时间戳(没有时间戳的签名在证书过期后失效)。
+  -->
+  <Target Name="SignMsi" AfterTargets="Build" Condition="'$(SignCertThumbprint)' != ''">
+    <Exec Command="signtool sign /sha1 &quot;$(SignCertThumbprint)&quot; /fd SHA256 /tr &quot;$(SignTimestampUrl)&quot; /td SHA256 &quot;$(TargetPath)&quot;"
+          ContinueOnError="false" />
+    <Message Importance="high" Text="已签名:$(TargetPath)(证书指纹 $(SignCertThumbprint))" />
+  </Target>
+
+  <Target Name="WarnUnsigned" AfterTargets="Build" Condition="'$(SignCertThumbprint)' == ''">
+    <Message Importance="high"
+             Text="MSI 未签名:未配置证书指纹(NETDISK_SIGN_CERT_THUMBPRINT)。未签名安装包会触发 SmartScreen 告警 —— 发布前请配置证书(见 Doc/WiX-配置指南.md)。" />
+  </Target>
 
 </Project>

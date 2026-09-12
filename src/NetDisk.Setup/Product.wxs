@@ -1,17 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  NetDisk 客户端 MSI(骨架;完整文件清单/签名/updater 接线见 DE-D-20)。
+  NetDisk 客户端 MSI(DE-D-20)。
 
-  R-26 两条硬要求(这里就先立住,免得 DE-D-20 才发现要改结构):
-    ① **perUser**:`Scope="perUser"` —— 普通用户没有管理员权限也能装(企业里
-       批量分发时"要求提权"是最常见的落地阻力);
-    ② **MajorUpgrade**:升级用 MajorUpgrade 而不是自己写 RemoveExistingProducts
-       的顺序 —— 后者的顺序错了会**先删旧版再装新版**,中途失败就是"两个版本
-       都没有";MajorUpgrade 由 WiX 生成正确的执行序列。
+  R-26 两条硬要求(结构必须先立住,改结构比改参数贵得多):
+    ① **perUser**:`Scope="perUser"` —— 普通用户不提权也能装(企业批量分发时
+       "要求提权"是最常见的落地阻力);
+    ② **MajorUpgrade**:升级用 MajorUpgrade 而不是手写 RemoveExistingProducts 顺序 ——
+       后者顺序错了会**先删旧版再装新版**,中途失败就是"两个版本都没有"。
 
-  DE-D-01 的验证目标是"这个工程能被 dotnet build 编出来"(证明 WiX 6.0.2 工具链
-  在 solution 里就位),因此这里**故意不含任何文件载荷** —— 载荷清单要等 App 有
-  可发布的产物(否则会写一份永远对不上的清单)。
+  ## 载荷:真实发布产物(DE-D-20 起)
+  用 `publish\**` 集合收全部文件(自包含发布,目标机无需预装 .NET)。
+  为什么不再用手写清单:几百个文件的清单**一定**会与产物漂移,而漂移的表现是
+  "装上去缺文件、运行时才报错"。集合式收编让"装了什么"就等于"发布了什么"。
+
+  ## 关于被抑制的三条 ICE(不是"为了编得过"而关检查)
+  `ICE38 / ICE64 / ICE91` 的前提都是 **per-machine 安装**:
+    - ICE38:per-machine 组件不能用"用户配置目录里的文件"当 KeyPath(那里没有管理员写权限);
+    - ICE64:per-machine 目录必须在卸载时移除;
+    - ICE91:文件装到 perUser 目录时**不会**复制到每个用户(per-machine 安装才关心这一点)。
+  本项目是 **perUser-only**(R-26),这三条的前提不成立,所以按官方建议抑制,
+  但**抑制本身被门禁盯着**:`server/cmd/depsguard` 的 R-26 检查同时要求
+  `Scope="perUser"` 与 `MajorUpgrade`,并把抑制清单钉成恰好这三条 ——
+  若有人把包改成 perMachine,`Scope="perUser"` 断言立刻失败,抑制也就失去了依据。
+  (DE-D-01 的踩坑记录:perUser + 空载荷会撞 ICE71/ICE64,这也是当时放占位文件的理由;
+  现在有真实载荷了,占位文件与那条组件一并移除。)
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="NetDisk"
@@ -29,37 +41,43 @@
       <Directory Id="INSTALLFOLDER" Name="NetDisk" />
     </StandardDirectory>
 
-    <!--
-      DE-D-01 的唯一载荷(占位说明文件);DE-D-20 用 App 的真实发布产物替换。
-      现在就放一个真实文件的理由:空 MSI 会在 ICE 校验阶段失败
-      (ICE71 无 Media 条目 / ICE64 perUser 目录未登记 RemoveFile),
-      而 ICE 校验是我们想保留的门禁 —— 为了"编得过"去关掉校验,
-      等于把"卸载残留"这类问题留到用户机器上。
-    -->
-    <ComponentGroup Id="PlaceholderPayload" Directory="INSTALLFOLDER">
+    <!-- 主入口:开始菜单快捷方式指向已安装的 exe(而不是程序目录里的裸 exe) -->
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="AppPayload" Directory="INSTALLFOLDER">
       <!--
-        Guid 必须**显式写死**(不能用 `*`):WIX0230 —— 同时含"文件"与
-        "注册表 KeyPath"的组件不满足自动生成 GUID 的条件。显式 GUID 在这里
-        也是正确的:组件标识必须跨版本稳定,升级(MajorUpgrade)才认得出
-        "这是同一个组件的新版本"。占位组件在 DE-D-20 被真实组件替换时会一并调整。
+        `Files` 集合:把 publish 产物全部收进一个组件组。
+        `publish` 由 `scripts/build-msi.cmd` 先跑 `dotnet publish` 生成
+        (顺序不可颠倒:先 go build 再拷前端那类错误在这里同样致命 ——
+         打包一份陈旧的产物,而构建日志一路绿灯)。
       -->
-      <Component Id="ReadmeComponent" Guid="6E1D0C6A-2B7F-4C9E-8A31-5F4D2B7E9C10">
-        <File Id="ReadmeFile" Source="Payload\README.txt" />
-        <!--
-          perUser 组件的 KeyPath **必须是 HKCU 下的注册表值**(ICE38):
-          没有管理员权限的安装不能拿"用户配置目录里的文件"当 KeyPath 依据 ——
-          卸载/修复时凭它判断"组件是否已安装"会失效。这也是 perUser 安装
-          区别于 perMachine 的关键一处(DE-D-20 的真实组件同样要遵守)。
-        -->
+      <Files Include="publish\**" />
+      <Component Id="InstallFolderRegistration" Guid="6E1D0C6A-2B7F-4C9E-8A31-5F4D2B7E9C10">
+        <!-- HKCU 登记:既是"已安装"的依据,也是卸载时清理程序目录的依据 -->
         <RegistryValue Root="HKCU" Key="Software\netdisk\NetDisk"
                        Name="installed" Type="integer" Value="1" KeyPath="yes" />
-        <!-- perUser 安装目录必须在卸载时移除(ICE64 的要求,也是"卸载干净"的要求) -->
         <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
       </Component>
     </ComponentGroup>
 
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppShortcutDir" Name="NetDisk">
+        <Component Id="StartMenuShortcut" Guid="1B7F4A22-9D53-4E08-B6C1-7A2E5F90D3B4">
+          <!-- 显式 GUID:组件标识必须跨版本稳定,MajorUpgrade 才认得出"同一个组件的新版本" -->
+          <Shortcut Id="AppShortcut" Name="NetDisk"
+                    Description="NetDisk 桌面客户端"
+                    Target="[INSTALLFOLDER]NetDisk.App.exe"
+                    WorkingDirectory="INSTALLFOLDER" />
+          <RegistryValue Root="HKCU" Key="Software\netdisk\NetDisk"
+                         Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
+          <RemoveFolder Id="RemoveShortcutFolder" Directory="AppShortcutDir" On="uninstall" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
     <Feature Id="MainFeature" Title="NetDisk" Level="1">
-      <ComponentGroupRef Id="PlaceholderPayload" />
+      <ComponentGroupRef Id="AppPayload" />
+      <ComponentRef Id="StartMenuShortcut" />
     </Feature>
   </Package>
 </Wix>
