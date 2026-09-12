@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ChangeFeedCheck —— DE-D-13 检查器(零额外 NuGet)。
+    ①SSE 报文解析(分块到达/多行 data/CRLF/注释心跳/畸形帧);
+    ②帧 id 拆 {space,seq} **按空间**推进游标;
+    ③重连**先逐空间补拉、再重建连接**(顺序是可断言的:连接回调必须发生在最后一次补拉之后);
+    ④事件不直接落定态(超窗/乱序/重复都有明确处置);
+    ⑤cursor_expired → 该空间全量重扫(绝不静默当空)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.ChangeFeed</RootNamespace>
+    <AssemblyName>ChangeFeedCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
