@@ -127,6 +127,15 @@ ALTER TABLE sync_state ADD COLUMN retry_after_utc TEXT NOT NULL DEFAULT '';"),
         new Migration(3, "expected-changes-size-and-mtime", @"
 ALTER TABLE expected_changes ADD COLUMN expected_size INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE expected_changes ADD COLUMN expected_mtime_ticks INTEGER NOT NULL DEFAULT 0;"),
+        // v4:记住**本机文件身份**(卷序列号 + FileId,DE-D-11)——
+        // 用来识别"本地改名"这个动作。
+        //
+        // 为什么必须落库而不是每次现算:改名之后**旧路径已经不存在了**,没法再问
+        // "旧路径的 FileId 是多少"。必须在文件还在的时候把它记下来,改名发生后才能
+        // 用它把"新路径"匹配回**同一个远端 file_id**,从而走改名接口而不是整份重传。
+        // (实测过没有这一列的后果:改名 = 重新上传一份 + 服务端留下重复的旧条目。)
+        new Migration(4, "sync-state-local-identity", @"
+ALTER TABLE sync_state ADD COLUMN local_identity TEXT NOT NULL DEFAULT '';"),
     };
 
     private StateStore(SqliteConnection conn, int schemaVersion, bool newerThanCode)

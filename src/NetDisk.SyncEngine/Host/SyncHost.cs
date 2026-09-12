@@ -18,16 +18,15 @@
 // 不在 MVP 内(后续):目录级移动/删除的远端回传、按 seq 增量、限速 UI、
 //   只读浏览模式、多空间。
 //
-// ⚠ **本地改名目前会整份重传**(这一点曾经在本文件里被写成"改名靠 FileId 识别",
-//   是**不实**的,2026-09-12 实测订正):本机扫描只按**相对路径**记账
-//   (ScanLocal → KnownVersion(rel) / remote[rel]),所以"改名"在引擎看来就是
-//   "旧路径消失 + 新路径出现" = 一个新文件 —— 会被整份重新上传,而旧名字在服务端
-//   **仍然留着一份**(实测:新名字 file id != 旧 id,旧条目未消失)。
-//   数据不丢(两端都有),但既费流量又留下重复文件。
-//   根治需要:把**本机文件身份**(DE-D-11 的 Win32FileIdentityProvider)也记进
-//   sync_state(目前只记远端 file_id),改名时按身份匹配到已知条目 →
-//   调契约里的 `POST /api/v1/files/{id}/move` 改名,而不是新建。
-//   证据:SyncHostCheck 场景 ⑥ 会把当前行为(旧名残留 + 新 id)打印出来。
+// **本地改名不重传**(2026-09-12 实现并真机验证):本机扫描本身只按相对路径记账,
+//   单靠它"改名"就长成"旧路径消失 + 新路径出现" = 一个新文件。所以要靠**本机文件身份**
+//   (DE-D-11 的 Win32FileIdentityProvider:卷序列号 + FileId)把它认回来:
+//   身份记在 sync_state.local_identity 里(改名后旧路径就没了,没法再回溯查,必须提前存),
+//   命中已知条目且旧路径已消失 → 调契约的 `PATCH /api/v1/files/{id}`(改名,带 base_version
+//   乐观锁)原地改,远端 **file_id 不变、版本 +1、旧名字消失**。
+//   任何不确定的情形都退回"当新文件上传"(宁可多传一次,也不能因为猜错把文件搬走);
+//   身份拿不到(NTFS 之外的盘/权限)时同样退化为"没有改名识别",不影响正确性。
+//   实测证据:SyncHostCheck 场景 ⑥(同一 file id / 旧名消失 / 版本递增三条断言)。
 
 using NetDisk.ClientCore;
 using NetDisk.SyncEngine.Files;
@@ -52,6 +51,7 @@ public sealed class SyncHost : IAsyncDisposable
     private readonly ClientConfig _config;
     private readonly ITokenProvider _tokens;
     private readonly FileApi _files;
+    private readonly IFileIdentityProvider _identity;
     private readonly Func<ITokenProvider, string, SseChangeStream>? _sseFactory;
     private readonly TimeProvider _clock;
 
@@ -90,13 +90,16 @@ public sealed class SyncHost : IAsyncDisposable
         TimeProvider? clock = null,
         bool watchLocal = true,
         Func<ITokenProvider, string, SseChangeStream>? sseFactory = null,
-        string? statePath = null)
+        string? statePath = null,
+        IFileIdentityProvider? identityProvider = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _tokens = tokens ?? throw new ArgumentNullException(nameof(tokens));
         _clock = clock ?? TimeProvider.System;
         _sseFactory = sseFactory;
         _files = new FileApi(api);
+        // 本机文件身份(DE-D-11):可注入,便于在非 Windows/无文件系统上单测改名逻辑
+        _identity = identityProvider ?? new Win32FileIdentityProvider();
 
         // 状态库路径**可注入**:一是让检查器能在临时目录里跑(不污染用户真实状态),
         // 二是出问题时能把状态库挪到别处做实验,而不是去动用户的 %APPDATA%。
@@ -261,13 +264,23 @@ public sealed class SyncHost : IAsyncDisposable
         }
 
         Notice?.Invoke("对账:进入本地上传阶段");
-        // ② 本地 → 远端(新文件或本地改动)
+        // ② 本地 → 远端(新文件 / 本地改动 / **本地改名**)
         foreach (var item in ScanLocal())
         {
             ct.ThrowIfCancellationRequested();
             var rel = item.RelativePath;
             var known = KnownVersion(rel);
             var remoteHas = remote.TryGetValue(rel, out var remoteEntry);
+
+            // ②a 改名识别(必须在"当成新文件上传"之前做)。
+            // 判据:这个路径我们**从没记过**,远端也没有它,但它的**本机文件身份**
+            // (卷+FileId)对得上某个已知条目 —— 而那个条目的旧路径已经不在了。
+            // 那就是"用户把 a.txt 改成了 b.txt",应当走改名接口,而不是再传一份。
+            if (!remoteHas && KnownFileId(rel) is null && await TryRenameAsync(rel, ct).ConfigureAwait(false))
+            {
+                continue;
+            }
+
             if (remoteHas && !LocalLooksChanged(rel))
             {
                 continue;
@@ -684,6 +697,88 @@ public sealed class SyncHost : IAsyncDisposable
         _ledger.Record(rel, info.Length, info.LastWriteTimeUtc.Ticks);
     }
 
+    // ---------------------------------------------------------------- 改名
+
+    /// <summary>
+    /// 试探性处理"本地改名":是新路径、远端没有它,但它的本机文件身份对得上某个
+    /// **旧路径已消失**的已知条目 → 调改名接口,返回 true 表示"已处理,别再上传"。
+    ///
+    /// 为什么用身份而不是名字:改名后名字已经变了,唯一不变的是文件身份
+    /// (卷序列号 + FileId)。这也是 DE-D-11 那套东西存在的理由。
+    /// 任何不确定的情形都返回 false(= 交给原来的"当新文件上传"路径)——
+    /// **宁可贵一次上传,也不能因为猜错而把用户的文件搬走**。
+    /// </summary>
+    private async Task<bool> TryRenameAsync(string rel, CancellationToken ct)
+    {
+        var local = LocalOf(rel);
+        var idn = IdentityOf(local);
+        if (idn is null)
+        {
+            return false;
+        }
+        var identity = FormatIdentity(idn.Value);
+
+        var oldRel = _store.Scalar(
+            "SELECT local_path FROM sync_state WHERE local_identity=$id LIMIT 1", ("id", identity));
+        if (oldRel is null or DBNull)
+        {
+            return false;
+        }
+        var oldPath = Convert.ToString(oldRel)!;
+        if (string.Equals(oldPath, rel, StringComparison.OrdinalIgnoreCase))
+        {
+            return false; // 路径没变(只是第一次见到它)→ 走常规上传
+        }
+        if (File.Exists(LongPath.ToExtended(LocalOf(oldPath))))
+        {
+            return false; // 旧路径还在:这不是改名(更像复制),让两边各自正常同步
+        }
+        var fileId = KnownFileId(oldPath);
+        if (string.IsNullOrEmpty(fileId))
+        {
+            return false;
+        }
+
+        try
+        {
+            Upsert(rel, SyncState.PendingUpload, $"识别为改名({oldPath} → {rel})", KnownVersion(oldPath));
+            var after = await _files.RenameAsync(fileId!, Path.GetFileName(local), KnownVersion(oldPath), ct)
+                .ConfigureAwait(false);
+            // 状态库一行以 file_id 为主键 → 改 local_path 即可,**不产生第二行**,
+            // 远端 file_id / 版本号都保持连续(这正是"改名不重传"的意义)。
+            SaveState(after, rel, local);
+            _store.Execute("DELETE FROM sync_state WHERE local_path=$p AND file_id<>$id",
+                ("p", oldPath), ("id", fileId!));
+            Upsert(rel, SyncState.InSync, $"已改名(原 {oldPath})", after.version);
+            Notice?.Invoke($"改名:{oldPath} → {rel}(未重传)");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // 改名失败**不能**吞:吞掉的话本地会一直停在"没有对应远端条目"的状态,
+            // 而用户以为改完了。这里如实报出并降级为普通上传(数据安全优先 —— 宁可多传一份,
+            // 也不能让文件停在两个地方都不对的状态)。
+            Notice?.Invoke($"改名失败({oldPath} → {rel}),将按新文件上传:{ex.Message}");
+            return false;
+        }
+    }
+
+    private FileIdentity? IdentityOf(string local)
+    {
+        try
+        {
+            return File.Exists(LongPath.ToExtended(local)) ? _identity.TryGet(local) : null;
+        }
+        catch (Exception)
+        {
+            // 身份拿不到(非 NTFS/网络盘/权限)→ 退化成"没有改名识别",不影响正确性
+            return null;
+        }
+    }
+
+    private static string FormatIdentity(in FileIdentity id) =>
+        $"{id.VolumeSerial}:{id.FileIdHigh}:{id.FileIdLow}";
+
     private void SaveState(EntryView e, string rel, string local)
     {
         long mtime = 0;
@@ -691,16 +786,20 @@ public sealed class SyncHost : IAsyncDisposable
         {
             mtime = new FileInfo(LongPath.ToExtended(local)).LastWriteTimeUtc.Ticks;
         }
+        // 本机文件身份**必须在这里落库**:改名之后旧路径就没了,没法再回溯查它的身份。
+        var idn = IdentityOf(local);
+        var identity = idn is null ? "" : FormatIdentity(idn.Value);
         _store.Execute(
             """
-            INSERT INTO sync_state(file_id, space_id, local_path, remote_version, local_mtime_ticks, size, hash_sha256, state, updated_at_utc)
-            VALUES ($id, $space, $p, $ver, $mtime, $size, $hash, 'InSync', $now)
+            INSERT INTO sync_state(file_id, space_id, local_path, remote_version, local_mtime_ticks, size, hash_sha256, state, updated_at_utc, local_identity)
+            VALUES ($id, $space, $p, $ver, $mtime, $size, $hash, 'InSync', $now, $idn)
             ON CONFLICT(file_id) DO UPDATE SET
               local_path=$p, remote_version=$ver, local_mtime_ticks=$mtime, size=$size,
-              hash_sha256=$hash, state='InSync', updated_at_utc=$now
+              hash_sha256=$hash, state='InSync', updated_at_utc=$now,
+              local_identity=CASE WHEN $idn='' THEN local_identity ELSE $idn END
             """,
             ("id", e.id), ("space", _config.SpaceId), ("p", rel), ("ver", e.version),
             ("mtime", mtime), ("size", e.size), ("hash", e.hash_sha256 ?? ""),
-            ("now", _clock.GetUtcNow().ToString("O")));
+            ("now", _clock.GetUtcNow().ToString("O")), ("idn", identity));
     }
 }

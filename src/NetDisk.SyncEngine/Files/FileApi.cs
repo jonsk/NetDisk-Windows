@@ -95,6 +95,24 @@ public sealed class FileApi
         _api.GetAsync<EntryView>($"/api/v1/files/{Uri.EscapeDataString(fileId)}", ct);
 
     /// <summary>
+    /// 改用名(契约 <c>PATCH /api/v1/files/{id}</c>,带 base_version 乐观锁)。
+    ///
+    /// 用它而不是 `POST /files/{id}/move` 的两个理由:
+    ///   ① 纯改名只需要 name,不需要搬父目录;
+    ///   ② move **超阈值会返回 202 异步任务**(条目仍在原处,不允许乐观移动),
+    ///      而 rename 是同步 200,调用方能拿到确定结果 —— 改名这种小操作不该引入
+    ///      "任务在跑、状态未知"的中间态。
+    /// 服务端在提交后会推一条 updated 事件,所以另一端能及时看到。
+    /// </summary>
+    public Task<EntryView> RenameAsync(
+        string fileId, string newName, long baseVersion = 0, CancellationToken ct = default) =>
+        _api.PatchAsync<EntryView>(
+            $"/api/v1/files/{Uri.EscapeDataString(fileId)}",
+            new { name = newName },
+            baseVersion == 0 ? null : baseVersion,
+            ct);
+
+    /// <summary>
     /// 列出子树并算出**相对路径**(首次运行向导的容量预估要用它)。
     ///
     /// 为什么要单独一个方法:列表接口只给 parent_id,**不给路径**;而"这次要同步多少
