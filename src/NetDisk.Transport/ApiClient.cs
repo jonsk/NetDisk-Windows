@@ -88,10 +88,23 @@ public sealed class ApiException : Exception
 
     public bool IsTokenRevoked => Code == "token_revoked";
 
-    /// <summary>是否值得重试(限速/临时不可用;业务冲突一律不重试)。</summary>
-    public bool IsTransient => Status == HttpStatusCode.TooManyRequests
-        || Status == HttpStatusCode.ServiceUnavailable
-        || (int)Status >= 500;
+    /// <summary>
+    /// 是否值得重试:**只认可枚举的"暂时性"状态**(429 / 500 / 502 / 503 / 504)。
+    ///
+    /// 为什么不用 `(int)Status >= 500` 这种范围判断(实测踩到):507 `InsufficientStorage`
+    /// 落在这个范围里,而它**永远重试不好**(额度不足/磁盘水位),重试还会反复触发预留额度检查;
+    /// 501(未实现)、505(版本不支持)同理 —— 重试只是把一次可读的失败变成三次。
+    /// 5xx 是个"类别",不是"暂时性"的同义词,所以判定必须白名单化。
+    /// </summary>
+    public bool IsTransient => IsRetryableStatus(Status);
+
+    /// <summary>可重试的 HTTP 状态(白名单;见 <see cref="IsTransient"/> 的说明)。</summary>
+    public static bool IsRetryableStatus(HttpStatusCode status) => status is
+        HttpStatusCode.TooManyRequests
+        or HttpStatusCode.InternalServerError
+        or HttpStatusCode.BadGateway
+        or HttpStatusCode.ServiceUnavailable
+        or HttpStatusCode.GatewayTimeout;
 }
 
 /// <summary>客户端行为开关(退避与重试)。</summary>
@@ -149,6 +162,70 @@ public sealed class ApiClient
 
     /// <summary>底层 HttpClient(WebDAV/TUS 复用同一条连接池)。</summary>
     public HttpClient Http => _http;
+
+    /// <summary>
+    /// 原始请求(自定义请求头 + <b>可重建的 body 工厂</b>)。TUS 分片、SSE、下载都走这里。
+    ///
+    /// 为什么 body 是**工厂**而不是 <see cref="HttpContent"/> 实例:<see cref="HttpContent"/>
+    /// 不能重复发送(重试复用同一实例会抛 InvalidOperationException,而且只会在"重试"
+    /// 这条不常走的路径上暴露)。退避重试与分片续传都必须能重建 body,所以签名上就要求
+    /// 一个工厂 —— 让"重试时 body 已失效"这类问题在编译期就无从发生。
+    ///
+    /// <paramref name="idempotent"/> 为 false 时不做自动重试(建资源类请求由调用方决定)。
+    /// </summary>
+    public async Task<HttpResponseMessage> SendRawAsync(
+        HttpMethod method,
+        string path,
+        Func<HttpContent>? contentFactory = null,
+        IReadOnlyDictionary<string, string>? headers = null,
+        bool idempotent = true,
+        CancellationToken ct = default)
+    {
+        var attempt = 0;
+        while (true)
+        {
+            using var req = new HttpRequestMessage(method, new Uri(_options.BaseAddress, path));
+            if (contentFactory is not null)
+            {
+                req.Content = contentFactory();
+            }
+            if (headers is not null)
+            {
+                foreach (var (k, v) in headers)
+                {
+                    req.Headers.TryAddWithoutValidation(k, v);
+                }
+            }
+            if (_tokens is not null)
+            {
+                var token = await _tokens.GetAccessTokenAsync(ct).ConfigureAwait(false);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            }
+
+            HttpResponseMessage resp;
+            try
+            {
+                resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (HttpRequestException) when (attempt + 1 < _retry.MaxAttempts && idempotent)
+            {
+                await BackoffAsync(attempt, null, ct).ConfigureAwait(false);
+                attempt++;
+                continue;
+            }
+
+            if (!ShouldRetry(resp.StatusCode, idempotent) || attempt + 1 >= _retry.MaxAttempts)
+            {
+                return resp;
+            }
+
+            var retryAfter = ParseRetryAfter(resp);
+            resp.Dispose();
+            await BackoffAsync(attempt, retryAfter, ct).ConfigureAwait(false);
+            attempt++;
+        }
+    }
 
     /// <summary>GET 并解析 JSON。</summary>
     public Task<T> GetAsync<T>(string path, CancellationToken ct = default)
@@ -226,8 +303,9 @@ public sealed class ApiClient
             if (err is null || !err.IsTokenRevoked)
             {
                 _tokens.OnUnauthorized();
-                using var replay = Clone(req, payload);
-                using var resp2 = await SendWithRetryAsync(replay, idempotent, ct).ConfigureAwait(false);
+                using var resp2 = await SendRawAsync(method, path,
+                    payload is null ? null : () => new StringContent(payload, Encoding.UTF8, "application/json"),
+                    headers: null, idempotent: idempotent, ct: ct).ConfigureAwait(false);
                 var text2 = await resp2.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 if (!resp2.IsSuccessStatusCode)
                 {
@@ -269,55 +347,18 @@ public sealed class ApiClient
         return obj.ToJsonString(JsonOptions);
     }
 
-    private static HttpRequestMessage Clone(HttpRequestMessage src, string? payload)
-    {
-        var req = new HttpRequestMessage(src.Method, src.RequestUri);
-        if (payload is not null)
-        {
-            req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
-        }
-        return req;
-    }
-
-    private async Task<HttpResponseMessage> SendWithRetryAsync(
+    private Task<HttpResponseMessage> SendWithRetryAsync(
         HttpRequestMessage template, bool idempotent, CancellationToken ct)
     {
-        var attempt = 0;
-        while (true)
-        {
-            // 每轮都要新建请求对象:HttpRequestMessage 与 HttpContent 都**不能重复发送**,
-            // 重试时复用同一个实例会抛 InvalidOperationException(而且是在"重试"这条
-            // 本来就不常走的路径上,很容易一直没被发现)。
-            using var req = CloneRequest(template);
-            if (_tokens is not null)
-            {
-                var token = await _tokens.GetAccessTokenAsync(ct).ConfigureAwait(false);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            }
-
-            HttpResponseMessage resp;
-            try
-            {
-                resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
-                    .ConfigureAwait(false);
-            }
-            catch (HttpRequestException) when (attempt + 1 < _retry.MaxAttempts && idempotent)
-            {
-                await BackoffAsync(attempt, null, ct).ConfigureAwait(false);
-                attempt++;
-                continue;
-            }
-
-            if (!ShouldRetry(resp.StatusCode, idempotent) || attempt + 1 >= _retry.MaxAttempts)
-            {
-                return resp;
-            }
-
-            var retryAfter = ParseRetryAfter(resp);
-            resp.Dispose();
-            await BackoffAsync(attempt, retryAfter, ct).ConfigureAwait(false);
-            attempt++;
-        }
+        // 与 SendRawAsync 共用同一条退避路径(只多一步"从模板取出头与 body"),
+        // 免得两处各写一遍重试策略 —— 那样必然会在某次修改后只改对一处。
+        var headers = template.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value));
+        var payload = template.Content is StringContent sc
+            ? sc.ReadAsStringAsync().GetAwaiter().GetResult()
+            : null;
+        return SendRawAsync(template.Method, template.RequestUri!.PathAndQuery,
+            payload is null ? null : () => new StringContent(payload, Encoding.UTF8, "application/json"),
+            headers, idempotent, ct);
     }
 
     private bool ShouldRetry(HttpStatusCode status, bool idempotent)
@@ -326,9 +367,7 @@ public sealed class ApiClient
         {
             return false;
         }
-        return status == HttpStatusCode.TooManyRequests
-            || status == HttpStatusCode.ServiceUnavailable
-            || (int)status >= 500;
+        return ApiException.IsRetryableStatus(status);
     }
 
     private async Task BackoffAsync(int attempt, TimeSpan? retryAfter, CancellationToken ct)
@@ -372,21 +411,6 @@ public sealed class ApiClient
             return diff > TimeSpan.Zero ? diff : TimeSpan.Zero;
         }
         return null;
-    }
-
-    private static HttpRequestMessage CloneRequest(HttpRequestMessage template)
-    {
-        var req = new HttpRequestMessage(template.Method, template.RequestUri);
-        if (template.Content is StringContent sc)
-        {
-            var payload = sc.ReadAsStringAsync().GetAwaiter().GetResult();
-            req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
-        }
-        foreach (var h in template.Headers)
-        {
-            req.Headers.TryAddWithoutValidation(h.Key, h.Value);
-        }
-        return req;
     }
 
     private static T Deserialize<T>(string text)

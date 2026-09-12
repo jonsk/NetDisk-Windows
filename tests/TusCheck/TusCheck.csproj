@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    TusCheck —— DE-D-06 的行为检查器(零 NuGet 依赖)。
+
+    这里用一个"会记账的假 TUS 服务端"(HttpMessageHandler)来复现真实的协议语义:
+    偏移校验、ticket 校验、写满即定稿、以及"服务端只收到一半"的中断场景。
+    断言的重点不是"能传完",而是**中断/重试/续传之后文件内容仍然正确**。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Tus</RootNamespace>
+    <AssemblyName>TusCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+  </ItemGroup>
+
+</Project>

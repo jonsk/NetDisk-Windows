@@ -35,6 +35,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑭ 401 token_revoked → 不重放", CheckNoReplayAfterRevokedAsync),
     ("⑮ WebDAV If-Match → 412 结构化异常", CheckWebDavIfMatchAsync),
     ("⑯ request_id 带进异常(排障用)", CheckRequestIdAsync),
+    ("⑰ 507/501 不算暂时性(白名单而非 >=500)", CheckNotRetryable5xxAsync),
 };
 
 var failed = 0;
@@ -281,6 +282,28 @@ static async Task CheckWebDavIfMatchAsync()
             content: new StringContent("x")));
     Assert(ex.IsPreconditionFailed, $"WebDAV 条件失败应可判定,实际 {ex.Status}");
     Assert(h.LastIfMatch() == "\"00000008-deadbeef\"", $"If-Match 头应原样发出,实际 {h.LastIfMatch()}");
+}
+
+static async Task CheckNotRetryable5xxAsync()
+{
+    // `(int)Status >= 500` 这种范围判断会把 507(InsufficientStorage)、501、505
+    // 一起当成"暂时性" —— 而它们**永远重试不好**,507 还会反复触发预留额度检查。
+    // 这条断言把"5xx 是类别、不是暂时性的同义词"钉住(TUS 检查器先暴露的缺陷)。
+    Assert(!ApiException.IsRetryableStatus(HttpStatusCode.InsufficientStorage), "507 不该被重试");
+    Assert(!ApiException.IsRetryableStatus(HttpStatusCode.NotImplemented), "501 不该被重试");
+    Assert(!ApiException.IsRetryableStatus(HttpStatusCode.HttpVersionNotSupported), "505 不该被重试");
+    Assert(ApiException.IsRetryableStatus(HttpStatusCode.TooManyRequests), "429 该被重试");
+    Assert(ApiException.IsRetryableStatus(HttpStatusCode.InternalServerError), "500 该被重试");
+    Assert(ApiException.IsRetryableStatus(HttpStatusCode.BadGateway), "502 该被重试");
+    Assert(ApiException.IsRetryableStatus(HttpStatusCode.ServiceUnavailable), "503 该被重试");
+    Assert(ApiException.IsRetryableStatus(HttpStatusCode.GatewayTimeout), "504 该被重试");
+
+    // 行为层也要一致:507 只发一次
+    var h = new Stub();
+    h.Enqueue(HttpStatusCode.InsufficientStorage, Error("storage_full", "磁盘水位", null, null));
+    var api = h.Client(opts => opts with { DelayAsync = (_, _, _) => Task.CompletedTask });
+    await Catch<ApiException>(() => api.GetAsync<JsonElement>("/x"));
+    Assert(h.CallCount == 1, $"507 不该重试,实际发了 {h.CallCount} 次");
 }
 
 static async Task CheckRequestIdAsync()
