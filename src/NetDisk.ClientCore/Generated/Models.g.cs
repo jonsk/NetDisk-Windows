@@ -285,6 +285,8 @@ public sealed record UploadCreateRequest
     public required string name { get; init; }
     public required long size { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? allow_overwrite { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? hash { get; init; }
 }
 
