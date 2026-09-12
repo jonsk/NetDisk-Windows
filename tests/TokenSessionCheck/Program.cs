@@ -58,6 +58,16 @@ return 1;
 
 static ClientOptions Options() => new() { BaseAddress = new Uri("http://127.0.0.1:9/") };
 
+// 统一的时间基准(与 FakeClock 的固定起点一致)。
+//
+// 为什么不用 DateTimeOffset.UtcNow:**真实时间与假时钟是两条不同的时间轴**。
+// 假时钟起点固定在 2026-09-12 10:00:00Z,而真实 UtcNow 一直往前走;混用会让
+// "过期与否"的判定随时间**变号** —— 同一份代码在某天之前是绿的、之后确定性变红,
+// 而产品代码一行没改(第 ⑨ 项就是这样炸的,实测 3/3)。
+// 所以本文件里**任何**"什么时候过期"都用这条基准或注入的 clock 算。
+// (写成静态局部函数而不是字段:本文件是顶层语句,不能声明 static readonly 字段。)
+static DateTimeOffset FixedNow() => new(2026, 9, 12, 10, 0, 0, TimeSpan.Zero);
+
 static TokenSet Pair(string access, string refresh, DateTimeOffset expiresAt) => new()
 {
     AccessToken = access,
@@ -73,7 +83,7 @@ static Task CheckDpapiRoundTripAsync()
     try
     {
         var store = new DpapiTokenStore(path);
-        var tokens = Pair("access-plain", "refresh-plain", DateTimeOffset.UtcNow.AddMinutes(5));
+        var tokens = Pair("access-plain", "refresh-plain", FixedNow().AddMinutes(5));
         store.SaveAsync(tokens).AsTask().GetAwaiter().GetResult();
 
         var loaded = store.LoadAsync().AsTask().GetAwaiter().GetResult()
@@ -93,7 +103,7 @@ static Task CheckNoPlaintextOnDiskAsync()
         var store = new DpapiTokenStore(path);
         var canaryAccess = "CANARY-ACCESS-c3f1a9";
         var canaryRefresh = "CANARY-REFRESH-7b2e40";
-        store.SaveAsync(Pair(canaryAccess, canaryRefresh, DateTimeOffset.UtcNow.AddMinutes(5)))
+        store.SaveAsync(Pair(canaryAccess, canaryRefresh, FixedNow().AddMinutes(5)))
             .AsTask().GetAwaiter().GetResult();
 
         var bytes = File.ReadAllBytes(path);
@@ -114,7 +124,7 @@ static Task CheckTamperedBlobAsync()
     try
     {
         var store = new DpapiTokenStore(path);
-        store.SaveAsync(Pair("a", "r", DateTimeOffset.UtcNow.AddMinutes(5))).AsTask().GetAwaiter().GetResult();
+        store.SaveAsync(Pair("a", "r", FixedNow().AddMinutes(5))).AsTask().GetAwaiter().GetResult();
 
         // 翻掉中间一个字节:DPAPI 完整性校验必须让它解不开
         var bytes = File.ReadAllBytes(path);
@@ -137,7 +147,7 @@ static Task CheckWrongEntropyAsync()
     try
     {
         var store = new DpapiTokenStore(path);
-        store.SaveAsync(Pair("a", "r", DateTimeOffset.UtcNow.AddMinutes(5))).AsTask().GetAwaiter().GetResult();
+        store.SaveAsync(Pair("a", "r", FixedNow().AddMinutes(5))).AsTask().GetAwaiter().GetResult();
         var blob = File.ReadAllBytes(path);
 
         // 用 Windows 自带能力以外的方式无法验证"别的熵解不开",所以这里退一步:
@@ -160,8 +170,8 @@ static Task CheckNoTempLeftoverAsync()
     try
     {
         var store = new DpapiTokenStore(path);
-        store.SaveAsync(Pair("a", "r", DateTimeOffset.UtcNow.AddMinutes(5))).AsTask().GetAwaiter().GetResult();
-        store.SaveAsync(Pair("a2", "r2", DateTimeOffset.UtcNow.AddMinutes(5))).AsTask().GetAwaiter().GetResult();
+        store.SaveAsync(Pair("a", "r", FixedNow().AddMinutes(5))).AsTask().GetAwaiter().GetResult();
+        store.SaveAsync(Pair("a2", "r2", FixedNow().AddMinutes(5))).AsTask().GetAwaiter().GetResult();
 
         var dir = Path.GetDirectoryName(path)!;
         var leftovers = Directory.GetFiles(dir, Path.GetFileName(path) + ".tmp");
@@ -296,8 +306,8 @@ static async Task CheckNetworkFailureKeepsSessionAsync()
 
 static async Task CheckSignOutAsync()
 {
-    var (store, handler, _, session) = NewSession();
-    await store.SaveAsync(Pair("acc-1", "ref-1", DateTimeOffset.UtcNow.AddMinutes(30)));
+    var (store, handler, clock, session) = NewSession();
+    await store.SaveAsync(Pair("acc-1", "ref-1", clock.GetUtcNow().AddMinutes(30)));
     await session.StartAsync();
     await session.SignOutAsync();
 
@@ -421,8 +431,8 @@ sealed class StubHandler : HttpMessageHandler
 /// <summary>可控时钟(不依赖真实时间流逝 —— 用 Task.Delay 等 15 分钟是不可接受的)。</summary>
 sealed class FakeClock : TimeProvider
 {
-    // ⚠⚠ **本文件的铁律:任何"令牌什么时候过期"都必须用注入的 clock 算,
-    // 绝不能用 DateTimeOffset.UtcNow。**
+    // ⚠⚠ **本文件的铁律:任何"令牌什么时候过期"都必须用注入的 clock(或顶部那条
+    // FixedNow 基准)算,绝不能用 DateTimeOffset.UtcNow。**
     //
     // 原因(2026-09-12 实测踩到):这个假时钟的起点是**固定**的常量,而真实
     // UtcNow 一直在往前走。两者混用时,"真实时间 ± 几分钟"的令牌相对假时钟
@@ -432,9 +442,9 @@ sealed class FakeClock : TimeProvider
     // 于是检查结果变成"看今天几点跑"——第 ⑨ 项就是这样从绿变红(3/3 确定性失败),
     // 而**产品代码一行没改**,极易被误判成产品回归。
     //
-    // 已修:第 ⑨ 项改用注入的 clock。**其余 7 处仍用 DateTimeOffset.UtcNow
-    // (76/96/117/140/163/164/293 行的 AddMinutes(+5/+30)),它们目前恰好都在绿区,
-    // 但属于同一类隐患,应在后续统一改为注入 clock(见清单"已知待办")。**
+    // 已全部修掉:第 ⑨ 项改用注入 clock;其余 7 处(DPAPI 往返/篡改/残留三项里的
+    // 6 处令牌构造 + 主动登出 1 处)改用顶部的 FixedNow / 注入 clock。
+    // 现在本文件里**不存在** DateTimeOffset.UtcNow(可用 grep 反查)。
     private DateTimeOffset _now = new(2026, 9, 12, 10, 0, 0, TimeSpan.Zero);
 
     public override DateTimeOffset GetUtcNow() => _now;
