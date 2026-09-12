@@ -40,23 +40,40 @@ public static class NameRules
     /// <summary>UTF-8 字节数(不是字符数:中文名按字节计)。</summary>
     public static int Utf8Length(string s) => System.Text.Encoding.UTF8.GetByteCount(s);
 
-    /// <summary>名字是否可用于上传(空/超长/含非法字符/保留名/首尾点空格 → 否)。</summary>
+    /// <summary>
+    /// 名字是否可用于上传(空/超长/含非法字符/保留名/首尾点空格 → 否)。
+    /// </summary>
+    /// <remarks>
+    /// **必须先 NFC 归一再判**:服务端 namepolicy 的顺序就是"归一再校验",而同一串文字
+    /// 用组合符写(分解形式)会比归一后**多占字节** —— 例如 80 个 `e` + 组合尖音符,
+    /// 分解形式 244 字节、NFC 之后只有 164 字节。客户端不归一就会把服务端接受的名字判成
+    /// 非法(用户看到"这个名字不能用",而服务端其实收得下),反之某些边界名字则会漏判。
+    ///
+    /// 这里的坑在于**它不会报错**:`string.Normalize` 在 `InvariantGlobalization=true` 时
+    /// 是空操作(不加载 ICU),整条规则看起来"实现了归一"而实际什么也没做 ——
+    /// 所以 Directory.Build.props 里必须把 InvariantGlobalization 关掉(DE-D-12 的
+    /// 双端夹具把这个静默失效抓了出来)。
+    /// </remarks>
     public static bool IsValidName(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return false;
-        if (Utf8Length(name) > MaxNameBytes) return false;
+        var normalized = Normalize(name);
+        if (Utf8Length(normalized) > MaxNameBytes) return false;
         // 服务端拒绝的字符集(6.7):路径分隔符、控制字符、Windows 非法字符
-        foreach (var ch in name)
+        foreach (var ch in normalized)
         {
             if (ch < 0x20 || ch is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|')
             {
                 return false;
             }
         }
-        if (name.EndsWith(' ') || name.EndsWith('.')) return false;
-        var stem = name.Split('.')[0];
+        if (normalized.EndsWith(' ') || normalized.EndsWith('.')) return false;
+        var stem = normalized.Split('.')[0];
         return !ReservedNames.Contains(stem, System.StringComparer.OrdinalIgnoreCase);
     }
+
+    /// <summary>NFC 归一(与服务端 <c>namepolicy.Normalize</c> 同款,也是冲突命名的前置)。</summary>
+    public static string Normalize(string name) => name.Normalize(System.Text.NormalizationForm.FormC);
 
     /// <summary>深度是否超限(根目录为 0 层)。</summary>
     public static bool IsDepthAllowed(int depth) => depth >= 0 && depth <= MaxDepth;

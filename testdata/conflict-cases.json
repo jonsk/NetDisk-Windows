@@ -1,0 +1,89 @@
+{
+  "note": "冲突命名双端一致性夹具(DE-D-12)。**由服务端实现生成**(NETDISK_EMIT_CONFLICT_FIXTURE=1 go test ./internal/namepolicy -run TestEmitConflictFixture -v),客户端 NetDisk.ClientCore.ConflictNaming 必须逐字节对齐;任一侧算法演进时先改服务端、再重新生成夹具。",
+  "cases": [
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀.bin",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_conflict_20260912T101500.bin",
+      "note": "4 字节字符跨截断边界:必须落在码点边界"
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_conflict_20260912T101500.txt",
+      "note": "ASCII 超长"
+    },
+    {
+      "name": "报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报.xlsx",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报_conflict_20260912T101500.xlsx",
+      "note": "中文超长:240 字节主体 + 扩展名"
+    },
+    {
+      "name": "name.",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "name_conflict_20260912T101500.",
+      "note": "以点结尾(扩展名为单个点)"
+    },
+    {
+      "name": "archive.tar.gz",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "archive.tar_conflict_20260912T101500.gz",
+      "note": "多段扩展名:只保留最后一段"
+    },
+    {
+      "name": "短名.txt",
+      "timestamp": "20260101T000000",
+      "max_bytes": 40,
+      "expected": "短名_conflict_20260101T000000.txt",
+      "note": "小预算:扩展名 + 后缀几乎占满"
+    },
+    {
+      "name": "报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报报_conflict_20260912T101500",
+      "note": "无扩展名的超长中文"
+    },
+    {
+      "name": "report.xlsx",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "report_conflict_20260912T101500.xlsx",
+      "note": "普通 ASCII 名 + 扩展名"
+    },
+    {
+      "name": "季度报告.xlsx",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "季度报告_conflict_20260912T101500.xlsx",
+      "note": "普通中文名"
+    },
+    {
+      "name": "名字.txt",
+      "timestamp": "20260101T000000",
+      "max_bytes": 10,
+      "expected": "名字.txt",
+      "note": "极端:后缀本身就超限,退化为截断"
+    },
+    {
+      "name": ".gitignore",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": ".gitignore_conflict_20260912T101500",
+      "note": "点开头:不能把整个名字当扩展名"
+    },
+    {
+      "name": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé.txt",
+      "timestamp": "20260912T101500",
+      "max_bytes": 240,
+      "expected": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééée_conflict_20260912T101500.txt",
+      "note": "组合符:截断后必须 NFC 重归一"
+    }
+  ]
+}

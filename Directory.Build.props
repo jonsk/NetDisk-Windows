@@ -15,7 +15,14 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!--
+      **必须为 false**:NFC 归一是契约要求(namepolicy 先归一再校验,冲突命名也按码点截断后
+      再 NFC)。而 InvariantGlobalization=true 时运行时**不加载 ICU**,`string.Normalize`
+      会静默变成空操作 —— 于是客户端在"分解形式的组合符"上会与服务端不一致:
+      同样的名字客户端算出 237 字节、服务端归一后只有 158 字节(DE-D-12 的共享夹具抓到的)。
+      这种不一致只在带组合符的名字上出现,靠人肉比对永远查不出来。
+    -->
+    <InvariantGlobalization>false</InvariantGlobalization>
     <!-- 版本按 ADR-3:桌面制品版本不随仓库 tag,用 +server.x.y.z 语义化后缀独立递增 -->
     <Version>1.0.0</Version>
     <InformationalVersion>1.0.0+server.1.0.0</InformationalVersion>

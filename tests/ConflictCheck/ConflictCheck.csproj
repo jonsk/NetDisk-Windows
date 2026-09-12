@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ConflictCheck —— DE-D-12 检查器(零额外 NuGet)。
+    两件事:①冲突命名与**服务端实现逐字节一致**(读共享夹具;
+       夹具由服务端生成,NETDISK_EMIT_CONFLICT_FIXTURE=1);
+    ②自动策略只认服务端 version(mtime 只展示),手动策略两边都不丢内容。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.Conflict</RootNamespace>
+    <AssemblyName>ConflictCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NetDisk.ClientCore\NetDisk.ClientCore.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.Transport\NetDisk.Transport.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>
