@@ -1,4 +1,4 @@
-// SyncHostCheck —— 客户端接线的**端到端**检查器(零 NuGet)。
+﻿// SyncHostCheck —— 客户端接线的**端到端**检查器(零 NuGet)。
 //
 // 与其它检查器的区别:它不测纯函数,而是把**真实**的登录/令牌/传输/状态库/对账
 // 全部接起来,打**真实服务端**(默认本机 8080,可用 NETDISK_E2E_BASE 指向真机),
@@ -175,7 +175,7 @@ try
         var copies = Directory.GetFiles(root, "*_conflict_*").Select(Path.GetFileName).ToArray();
         // 这条**必须失败**:上面版本号倒退导致冲突判据失效,所以本地改动会上传并覆盖远端改动。
         // 保留失败断言是为了让"会丢另一端修改"这件事在任何一次 CI 里都看得见。
-        Check("[缺陷可见]本地生成了冲突副本(本地改动没被丢弃)", copies.Length == 0,
+        Check("本地生成了冲突副本(本地改动没被丢弃)", copies.Length > 0,
             copies.Length > 0 ? string.Join(',', copies) : "没有副本");
         if (copies.Length > 0)
         {

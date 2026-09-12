@@ -1,4 +1,4 @@
-// 文件读写通道(列表 / 详情 / 下载 / 上传)—— MVP 客户端接线的第一块。
+﻿// 文件读写通道(列表 / 详情 / 下载 / 上传)—— MVP 客户端接线的第一块。
 //
 // 为什么放在 SyncEngine 而不是 Transport:
 //   下载要落盘,而落盘必须处理**长路径**(`\\?\` 前缀,见 Paths/LongPath)与
@@ -218,7 +218,7 @@ public sealed class FileApi
             }
         }
 
-        var res = await UploadAsync(spaceId, parentId, name, localPath, progress, ct).ConfigureAwait(false);
+        var res = await UploadAsync(spaceId, parentId, name, localPath, progress, allowOverwrite: false, ct).ConfigureAwait(false);
         return await GetEntryAsync(res.FileId, ct).ConfigureAwait(false);
     }
     /// <summary>按相对空间根的路径找条目(MVP:逐级列出定位)。</summary>
@@ -246,6 +246,7 @@ public sealed class FileApi
         string name,
         string localPath,
         IProgress<long>? progress = null,
+        bool allowOverwrite = false,
         CancellationToken ct = default)
     {
         var info = new FileInfo(LongPath.ToExtended(localPath));
@@ -260,6 +261,8 @@ public sealed class FileApi
             ParentId = parentId,
             Name = name,
             Size = info.Length,
+            // 只在显式覆盖时下发 true;其余留 null(服务端默认 false = 同名 409)
+            AllowOverwrite = allowOverwrite ? true : null,
         }, ct).ConfigureAwait(false);
 
         await using var stream = new FileStream(LongPath.ToExtended(localPath), FileMode.Open,

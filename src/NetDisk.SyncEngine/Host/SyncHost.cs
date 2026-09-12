@@ -1,4 +1,4 @@
-// 同步宿主(SyncHost)—— MVP 接线的核心:把"已经写好但一直没接线"的引擎跑起来。
+﻿// 同步宿主(SyncHost)—— MVP 接线的核心:把"已经写好但一直没接线"的引擎跑起来。
 //
 // 在此之前:登录/监听/状态机/账本/冲突裁决/传输队列**全部只是一个库 + 一堆检查器**,
 // App 里连一个都没实例化(用户装完 MSI 只能看到团队空间页)。这个类就是那条线。
@@ -386,7 +386,9 @@ public sealed class SyncHost : IAsyncDisposable
                 if (remoteEntry is null)
                 {
                     // 远端没有同名文件:TUS 建任务(分片 + 断点续传)
-                    var res = await _files.UploadAsync(spaceId, parentId, Path.GetFileName(local), local, null, token)
+                    var res = await _files.UploadAsync(
+                        spaceId, parentId, Path.GetFileName(local), local, null,
+                        allowOverwrite: false, token)
                         .ConfigureAwait(false);
                     after = new EntryView
                     {
@@ -404,9 +406,10 @@ public sealed class SyncHost : IAsyncDisposable
                     // 远端已有同名文件(本地改动要传回去):必须走**覆盖**。
                     // 用 TUS 建任务会被 409 name_conflict 拒掉(上传任务占名,ADR-5)——
                     // 实测就是这样,导致"改本地已有文件"永远同步不出去。
-                    after = await _files.UploadReplacingAsync(
-                        spaceId, remoteEntry.id, parentId, Path.GetFileName(local), local, null, token)
-                        .ConfigureAwait(false);
+                    var repl = await _files.UploadAsync(
+                        spaceId, parentId, Path.GetFileName(local), local, null,
+                        allowOverwrite: true, token).ConfigureAwait(false);
+                    after = await _files.GetEntryAsync(repl.FileId, token).ConfigureAwait(false);
                 }
                 SaveState(after, rel, local);
                 Upsert(rel, SyncState.InSync, "", after.version);

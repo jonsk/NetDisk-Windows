@@ -1,4 +1,4 @@
-// TUS 分片上传客户端(DE-D-06)。
+﻿// TUS 分片上传客户端(DE-D-06)。
 //
 // 协议面(服务端 6.10 / 7.7 A-10):
 //   POST   /api/v1/upload/create      {space_id,parent_id,name,size,hash} → upload_id + upload_ticket
@@ -36,6 +36,13 @@ public sealed record UploadRequest
 
     /// <summary>声明大小(服务端据此预留额度;必须与真实字节数一致,否则定稿时结算差额)。</summary>
     [JsonPropertyName("size")] public required long Size { get; init; }
+
+    /// <summary>
+    /// 显式声明「这次上传要覆盖同目录同名文件」(契约 UploadCreateRequest.allow_overwrite)。
+    /// 只有客户端**自己判定过**「这是我的改动、且远端版本没比我已知的更新」时才该置 true;
+    /// 不置或置 false 时同名会被 409 name_conflict 拒 —— 这是刻意保留的数据保护。
+    /// </summary>
+    [JsonPropertyName("allow_overwrite")] public bool? AllowOverwrite { get; init; }
 
     /// <summary>整文件 SHA-256(可选;给了才可能命中秒传)。</summary>
     [JsonPropertyName("hash")] public string? Hash { get; init; }
