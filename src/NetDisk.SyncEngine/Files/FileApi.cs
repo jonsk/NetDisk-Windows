@@ -16,6 +16,7 @@
 
 using System.Net;
 using System.Runtime.CompilerServices;
+using NetDisk.SyncEngine.Onboarding;
 using NetDisk.SyncEngine.Paths;
 using NetDisk.Transport;
 
@@ -92,6 +93,56 @@ public sealed class FileApi
     /// <summary>文件详情(单条)。</summary>
     public Task<EntryView> GetEntryAsync(string fileId, CancellationToken ct = default) =>
         _api.GetAsync<EntryView>($"/api/v1/files/{Uri.EscapeDataString(fileId)}", ct);
+
+    /// <summary>
+    /// 列出子树并算出**相对路径**(首次运行向导的容量预估要用它)。
+    ///
+    /// 为什么要单独一个方法:列表接口只给 parent_id,**不给路径**;而"这次要同步多少
+    /// 数据、有多少个文件"必须按相对路径来算(也是后面逐级建目录的依据)。
+    /// 这里一次列完整棵树,再按 id→(name,parent) 把路径上溯拼出来 ——
+    /// 不能对每个条目单独上溯(那是 N×深度 次请求,大目录下会明显变慢)。
+    /// </summary>
+    /// <param name="rootParentId">作为"根"的那一层(null = 空间根)。返回的路径相对它。</param>
+    public async Task<IReadOnlyList<RemoteEntry>> CollectTreeAsync(
+        string spaceId, string? rootParentId = null, CancellationToken ct = default)
+    {
+        var all = new List<EntryView>();
+        await foreach (var e in WalkAsync(spaceId, rootParentId, ct).ConfigureAwait(false))
+        {
+            all.Add(e);
+        }
+
+        // id → 条目,之后按 parent_id 上溯拼路径(向上直到 rootParentId 为止)
+        var byId = new Dictionary<string, EntryView>(StringComparer.Ordinal);
+        foreach (var e in all)
+        {
+            byId[e.id] = e;
+        }
+
+        var result = new List<RemoteEntry>(all.Count);
+        foreach (var e in all)
+        {
+            var parts = new List<string>();
+            var cur = e;
+            var depth = 0;
+            while (cur is not null && depth < 10_000)
+            {
+                parts.Insert(0, cur.name);
+                depth++;
+                if (cur.parent_id is null || string.Equals(cur.parent_id, rootParentId, StringComparison.Ordinal))
+                {
+                    break;
+                }
+                if (!byId.TryGetValue(cur.parent_id, out var parent))
+                {
+                    break; // 父条目不在本次结果里(被权限裁掉/并发删除):按当前已拼出的路径给出
+                }
+                cur = parent;
+            }
+            result.Add(new RemoteEntry(string.Join('/', parts), e.is_dir, e.size, parts.Count));
+        }
+        return result;
+    }
 
     /// <summary>列出账号可见的空间(MVP 用它挑出个人空间)。</summary>
     public Task<SpaceList> ListSpacesAsync(CancellationToken ct = default) =>
