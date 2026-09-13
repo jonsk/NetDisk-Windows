@@ -47,6 +47,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑫ 第一批跑完后再入队仍会被执行(worker 活性)", CheckEnqueueAfterDrainStillRunsAsync),
     ("⑬ 账本对没登记过的路径不抛异常(曾经 NRE)", CheckLedgerUnknownPathAsync),
     ("⑭ 配置里的并发/限速真的生效(不是死配置)", CheckConfigDrivesTransferOptionsAsync),
+    ("⑮ 排空返回即**全部完成**(不留「已出队未计数」的窗口)", CheckDrainMeansAllFinishedAsync),
 };
 
 var failed = 0;
@@ -439,6 +440,107 @@ static async Task CheckEnqueueAfterDrainStillRunsAsync()
     }
 
     Assert(ran == 12, $"三批共 12 个任务都必须执行,实际 {ran} —— 少执行说明有批次被静默丢掉");
+}
+
+// 回归(2026-09-13 真机现场):`SyncHostCheck` ⑫ 的「目录里的文件都上传了」**时好时坏** ——
+// 失败的那一下诊断显示"检查时远端确实还没有这个文件,几百毫秒后就有了",而状态表已经是 InSync。
+//
+// 根因:`DrainAsync` 的判据是「队列空 **且** 在跑 0」,而工作线程原来先 `TryDequeue`(队列瞬间变空)、
+// 之后才 `Interlocked.Increment(ref _active)` —— 中间那一小段里,任务既不在 `_pending` 也不在
+// `_active`,`DrainAsync` 直接返回,调用方以为"本轮对账完成",文件其实还在传。
+// 修法:任务**离开队列那一刻**就计入 `_active`(槽位等待与执行都在计数之内)。
+//
+// 验证方式(①段,确定性):用 `OnJobDequeuedAsync` 钩子把工作线程**卡在"刚离开队列"那一刻**,
+// 断言此时 `DrainAsync` 还没返回、`ActiveCount ≥ 1`;跑完再放行。
+// **反向验证**:把计数改回"拿到槽位之后"(即修复前的写法)→ ①段立刻失败
+// (实测:300 轮压力版在旧写法下全过 —— 靠碰运气的用例抓不住这个窗口,所以必须有钩子)。
+static async Task CheckDrainMeansAllFinishedAsync()
+{
+    // ① 确定性:任务已离开队列(还没跑完)时,排空**不得**已经返回
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var q = new TransferQueue(new TransferQueueOptions
+        {
+            MaxConcurrency = 2,
+            OnJobDequeuedAsync = async _ =>
+            {
+                entered.TrySetResult();
+                await release.Task.ConfigureAwait(false);
+            },
+        });
+        var ran = 0;
+        q.Enqueue(new TransferJob
+        {
+            Id = "ul:window",
+            DisplayName = "window.bin",
+            Direction = TransferDirection.Upload,
+            TotalBytes = 1,
+            Run = (_, _) =>
+            {
+                Interlocked.Increment(ref ran);
+                return Task.FromResult(1L);
+            },
+        });
+
+        var drain = q.DrainAsync();
+        var winner = await Task.WhenAny(entered.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert(winner == entered.Task, "工作线程没有走到「刚离开队列」这一步(钩子没被调用)");
+        // **先取样、再放行**:断言失败会直接抛异常,若不先放行,工作线程会永远卡在钩子里,
+        // 一条清晰的失败就退化成"看门狗 120s 超时"(实测踩到过)。
+        var drainReturnedEarly = drain.IsCompleted;
+        var activeWhileInFlight = q.ActiveCount;
+        release.TrySetResult();
+        try
+        {
+            await drain.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException)
+        {
+            // 用下面的取样值报错,这里不掩盖
+        }
+
+        Assert(!drainReturnedEarly,
+            "任务已经离开队列、但还没跑完,`DrainAsync` 却已经返回 —— " +
+            "调用方会以为本轮对账完成,而文件其实还在传(真机表现:上传断言时好时坏)");
+        Assert(activeWhileInFlight >= 1,
+            $"任务已离开队列但在跑计数为 {activeWhileInFlight} —— 计数必须从「离开队列」那一刻开始");
+
+        Assert(Volatile.Read(ref ran) == 1, "放行之后任务必须真的被执行");
+        Assert(q.PendingCount == 0 && q.ActiveCount == 0,
+            $"排空后队列状态应为 0/0,实际 待处理={q.PendingCount} 在跑={q.ActiveCount}");
+    }
+
+    // ② 压力:多轮多任务下,"排空返回 ⟹ 全部跑完"这条不变式同样成立
+    const int rounds = 200;
+    for (var round = 0; round < rounds; round++)
+    {
+        await using var q = new TransferQueue(new TransferQueueOptions { MaxConcurrency = 3 });
+        var enqueued = 0;
+        var finished = 0;
+        for (var i = 0; i < 6; i++)
+        {
+            Interlocked.Increment(ref enqueued);
+            q.Enqueue(new TransferJob
+            {
+                Id = $"ul:round{round}-{i}",
+                DisplayName = $"f{i}.bin",
+                Direction = TransferDirection.Upload,
+                TotalBytes = 1,
+                Run = async (_, _) =>
+                {
+                    await Task.Yield(); // 让出一次:制造"已出队、还没跑完"的真实交错
+                    Interlocked.Increment(ref finished);
+                    return 1;
+                },
+            });
+        }
+
+        await q.DrainAsync();
+        var done = Volatile.Read(ref finished);
+        Assert(done == enqueued,
+            $"第 {round} 轮:DrainAsync 已经返回,但只跑完 {done}/{enqueued} 个任务");
+    }
 }
 
 // 回归(2026-09 现场):同步日志里出现过

@@ -58,6 +58,20 @@ public sealed record TransferQueueOptions
 
     /// <summary>进度上报的字节增量阈值(默认 1MB)。</summary>
     public long ProgressStepBytes { get; init; } = 1024 * 1024;
+
+    /// <summary>
+    /// 任务**刚离开队列**那一刻的钩子(测试注入用;生产为 null)。
+    ///
+    /// 存在的唯一理由是让"排空语义"可以被**确定性地**验证:测试在钩子里卡住,然后断言
+    /// `DrainAsync` 此时**还没有返回**、且 `ActiveCount ≥ 1`。这正是曾经出错的窗口 ——
+    /// 旧写法先 `TryDequeue`(队列瞬间变空)、拿到槽位后才自增在跑计数,于是那一小段里
+    /// 任务既不在 `_pending` 也不在 `_active`,`DrainAsync` 直接返回,调用方以为本轮对账
+    /// 完成,而文件其实还在传(真机表现:`SyncHostCheck` ⑫ 的"文件都上传了"断言时好时坏)。
+    ///
+    /// 为什么用注入钩子而不是"多跑几轮碰运气":靠时序碰运气的用例既不可靠,
+    /// 也就没法做反向验证(实测:300 轮压力版在旧写法下**依然全过**)。
+    /// </summary>
+    public Func<CancellationToken, Task>? OnJobDequeuedAsync { get; init; }
 }
 
 /// <summary>传输队列。</summary>
@@ -189,7 +203,13 @@ public sealed class TransferQueue : IAsyncDisposable
                 return; // 没活了就退出;下一次 Enqueue 会再拉起工作线程(靠 _liveWorkers 判断)
             }
 
-            await _slots.WaitAsync(ct).ConfigureAwait(false);
+            // **从"离开队列"这一刻起就算在跑**,不能等拿到槽位再算。
+            //
+            // 为什么(真机实测出来的):`DrainAsync` 的判据是"队列空 **且** 在跑 0"。
+            // 若先出队、后自增,中间就有一个窗口:任务已不在 `_pending`、又还没计入 `_active` ——
+            // 此时 `DrainAsync` 直接返回,调用方以为"本轮对账完成",而文件其实还在传。
+            // 表现极具欺骗性:SyncHostCheck ⑫ 里 `本地删目录`/`多级目录文件上传` 这类断言
+            // **时好时坏**(诊断显示"检查那一下远端确实还没有,几百毫秒后就有了"、状态表是 InSync)。
             var active = Interlocked.Increment(ref _active);
             if (active > PeakConcurrency)
             {
@@ -197,12 +217,25 @@ public sealed class TransferQueue : IAsyncDisposable
             }
             try
             {
-                await RunJobAsync(job, ct).ConfigureAwait(false);
+                // 测试钩子放在**计数之后**(见 OnJobDequeuedAsync):它代表"任务已经离开队列",
+                // 而这里的不变式是"从这一刻到执行完成,`_active` 始终 ≥ 1"。
+                if (_options.OnJobDequeuedAsync is { } hook)
+                {
+                    await hook(ct).ConfigureAwait(false);
+                }
+                await _slots.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    await RunJobAsync(job, ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _slots.Release();
+                }
             }
             finally
             {
                 Interlocked.Decrement(ref _active);
-                _slots.Release();
             }
         }
         }
