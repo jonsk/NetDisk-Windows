@@ -600,6 +600,43 @@ try
         Check("⑩ 大文件最终确实传上去了",
             await files.FindByNameAsync(space.id, null, bigName) is not null);
     }
+
+    // ------------------------------------------------ ⑪ 保存设置后"按新配置重启同步"
+    // 设置页的「保存并重启同步」做两件事:把值写进配置,然后**换掉整个运行时**。
+    // 为什么必须换:同步目录、并发、限速都固化在 SyncHost/TransferQueue 的构造里,
+    // 就地改只会让界面显示新值而行为还是旧的 —— 那比不支持修改更糟(用户以为改了)。
+    // 这里钉住"换完确实生效",UI 本身的点击仍需人工验证(见验收清单 §5.3)。
+    Console.WriteLine();
+    Console.WriteLine("— ⑪ 按新配置重启同步");
+    {
+        var newRoot = Path.Combine(work, "root-restarted");
+        Directory.CreateDirectory(newRoot);
+        var cfg2Path = Path.Combine(work, "client-restarted.json");
+        var cfg2 = ClientConfig.Load(cfg2Path);
+        cfg2.BaseUrl = baseUrl;
+        cfg2.SyncRoot = newRoot;
+        cfg2.SpaceId = space.id;
+        cfg2.Onboarded = true;
+        cfg2.MaxConcurrency = 7;
+        cfg2.UploadKbps = 512;
+        cfg2.Save();
+
+        var fresh = SyncRuntime.FromStoredToken(ClientConfig.Load(cfg2Path), tokenPath: tokenPath);
+        Check("⑪ 用新配置能重新启动同步", await fresh.StartAsync());
+        Check("⑪ 新配置的并发真的生效(7)",
+            fresh.Host.QueueOptions.MaxConcurrency == 7,
+            $"实际 {fresh.Host.QueueOptions.MaxConcurrency}");
+        Check("⑪ 新配置的限速真的生效(512 KB/s)",
+            fresh.Host.QueueOptions.RateLimit.UploadBytesPerSecond == 512 * 1024,
+            $"实际 {fresh.Host.QueueOptions.RateLimit.UploadBytesPerSecond}");
+
+        var restartName = $"sync-check-{DateTime.Now:HHmmss}-restart.txt";
+        await File.WriteAllTextAsync(Path.Combine(newRoot, restartName), "after-restart");
+        await fresh.ReconcileAsync();
+        Check("⑪ 换到新同步目录后仍能正常同步(新目录里的文件已上传)",
+            await files.FindByNameAsync(space.id, null, restartName) is not null);
+        await fresh.DisposeAsync();
+    }
 }
 finally
 {

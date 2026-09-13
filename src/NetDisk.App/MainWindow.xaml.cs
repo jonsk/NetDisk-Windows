@@ -58,6 +58,67 @@ public partial class MainWindow : Window
         ShowLogin();
     }
 
+    /// <summary>
+    /// 「保存并重启同步」:配置已由设置页写入,这里**换掉整个运行时**。
+    ///
+    /// 为什么必须换而不是"就地应用":同步目录、并发、限速都固化在 SyncHost/TransferQueue 的构造里,
+    /// 就地改只会让界面显示新值而实际行为还是旧的 —— 那比不支持修改更糟(用户以为改了)。
+    /// 顺序也重要:先停旧的(排空/取消),再建新的;建失败就退回登录页,而不是留一个半死的界面。
+    /// </summary>
+    private async Task OnRestartRequested(ClientConfig config)
+    {
+        var old = _runtime;
+        if (old is not null)
+        {
+            Sync.Detach();
+            old.Host.StatusChanged -= OnStatusChanged;
+            old.Host.Notice -= OnEngineNotice;
+            await old.DisposeAsync();
+            _runtime = null;
+        }
+
+        var fresh = SyncRuntime.FromStoredToken(ClientConfig.Load());
+        if (!await fresh.StartAsync())
+        {
+            await fresh.DisposeAsync();
+            AppLog.Write("app", "按新配置重启同步失败:令牌不可用或配置不完整,退回登录页");
+            Sync.Detach();
+            ShowLogin();
+            return;
+        }
+        Attach(fresh);
+    }
+
+    /// <summary>
+    /// 「退出登录」:吊销服务端令牌 + 删除本地密文 + 回登录页。
+    ///
+    /// 只删本地密文是不够的:服务端那条 refresh 仍然有效(等于"登出"没登出),
+    /// 所以走 TokenSession.SignOutAsync(它会调服务端吊销端点)。
+    /// 文件一个都不动 —— 登出不是删数据。
+    /// </summary>
+    private async Task OnLogoutRequested()
+    {
+        var old = _runtime;
+        _runtime = null;
+        if (old is not null)
+        {
+            Sync.Detach();
+            old.Host.StatusChanged -= OnStatusChanged;
+            old.Host.Notice -= OnEngineNotice;
+            try
+            {
+                await old.Session.SignOutAsync();
+                AppLog.Write("app", "已退出登录(服务端令牌已吊销,本地密文已删除)");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("app", $"退出登录时吊销令牌失败(本地仍会清理):{ex.Message}");
+            }
+            await old.DisposeAsync();
+        }
+        ShowLogin();
+    }
+
     private void ShowLogin()
     {
         Tabs.Visibility = Visibility.Collapsed;
@@ -73,6 +134,7 @@ public partial class MainWindow : Window
         // 团队空间页也要用**带令牌**的客户端:否则它在真实使用中只能匿名请求,
         // 表现是"空间列表永远是空的"(而用户会以为是没有空间)。
         Spaces.Attach(runtime.Api);
+        Settings.Attach(runtime);
         runtime.Host.StatusChanged += OnStatusChanged;
         // 先补记历史:头几轮对账的进展发生在订阅之前(引擎在 StartAsync 里就开始了),
         // 不补记的话日志里会出现"什么都没有"的假象 —— 实测第一次就被这个误导过。

@@ -17,6 +17,9 @@
       <TabItem Header="团队空间">
         <views:SpacesView x:Name="Spaces" />
       </TabItem>
+      <TabItem Header="设置">
+        <views:SettingsView x:Name="Settings" RestartRequested="OnRestartRequested" LogoutRequested="OnLogoutRequested" />
+      </TabItem>
       <TabItem Header="关于">
         <StackPanel Margin="16">
           <TextBlock FontSize="18" FontWeight="SemiBold" Text="NetDisk 桌面端" />
