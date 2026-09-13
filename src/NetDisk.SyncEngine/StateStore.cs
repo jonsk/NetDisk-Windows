@@ -136,6 +136,18 @@ ALTER TABLE expected_changes ADD COLUMN expected_mtime_ticks INTEGER NOT NULL DE
         // (实测过没有这一列的后果:改名 = 重新上传一份 + 服务端留下重复的旧条目。)
         new Migration(4, "sync-state-local-identity", @"
 ALTER TABLE sync_state ADD COLUMN local_identity TEXT NOT NULL DEFAULT '';"),
+        // v5:通用小键值表 —— 目前只放**同步根身份**(卷序列号 + 根目录 FileId)。
+        //
+        // 为什么必须有它(实测发现):删除传播最危险的误判是"整个同步根换了地方/被重建,
+        // 于是本地什么都看不见",而**同步根不存在时 StartAsync 会自动重建**一个空目录 ——
+        // 空目录 + 本地文件全不见,与"用户把文件删光了"在扫描结果上完全一样,
+        // 服务端又是硬删、无回收站。根目录身份能区分这两者:重建/换盘会得到**新的 FileId**。
+        // 用独立的键值表而不是往 sync_state 塞行:它描述的是"这个库属于哪个根",不是某个文件。
+        new Migration(5, "sync-meta-kv", @"
+CREATE TABLE IF NOT EXISTS sync_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);"),
     };
 
     private StateStore(SqliteConnection conn, int schemaVersion, bool newerThanCode)

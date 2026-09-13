@@ -11,6 +11,7 @@
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
     <StackPanel Grid.Row="0">
@@ -39,5 +40,7 @@
 
     <TextBlock Grid.Row="3" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap"
                Text="状态含义:已同步 = 两端一致;上传中/下载中 = 正在传输;冲突 = 两端都改过,本地版本已另存为冲突副本;错误 = 需要处理的失败。" />
+    <TextBlock Grid.Row="4" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap"
+               Text="删除是双向同步的:在同步目录里删掉文件,服务器上也会删;另一端删掉的文件,这里也会删。删除在服务端不可恢复,且删掉的文件不会再出现在上面的列表里(可在 app.log 里查记录)。" />
   </Grid>
 </UserControl>

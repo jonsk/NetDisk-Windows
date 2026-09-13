@@ -240,6 +240,22 @@ public sealed class SyncHost : IAsyncDisposable
         // 下载阶段若不知道"这个旧名字是被改名带走的",就会把旧名字从服务端**拉回来一份**:
         // 远端是对的(旧名已消失),本地却多出一个旧名字,下一轮又会被当成新文件传上去。
         var renames = DetectLocalRenames();
+
+        // **删除传播(双向,无用户确认)**
+        //
+        // 产品决策(2026-09-13,用户拍板"删除要双向传播"+"一致优先、无条件",二次确认由我定):
+        // **删除无条件自动传播,两端都不弹确认**。安全性不靠"问用户",而靠**信号完整性**:
+        // 只有"列表完整成功、扫描未截断、每个待删文件所在目录可枚举"时才认定是删除。
+        //
+        // 为什么这么严:`DirectoryScanner` 用 `IgnoreInaccessible = true`(读不了的子目录**静默跳过**)
+        // 且 `MaxEntries` 超限是**静默截断** —— 这两条会让"看不见"伪装成"已删除"。
+        // 若照此传播,一次权限抖动或一次 ACL 变更就会把远端文件删光(服务端是**硬删、无回收站**)。
+        // 同理远端侧:列举失败会抛异常(不静默返回短列表),所以"列完了"这件事本身可信。
+        var deletions = await PropagateDeletionsAsync(spaceId, remote, renames, ct).ConfigureAwait(false);
+        if (deletions > 0)
+        {
+            Notice?.Invoke($"删除传播:本轮两端共删除 {deletions} 个文件");
+        }
         // ① 远端 → 本地
         foreach (var (rel, entry) in remote)
         {
@@ -814,6 +830,290 @@ public sealed class SyncHost : IAsyncDisposable
 
     private static string FormatIdentity(in FileIdentity id) =>
         $"{id.VolumeSerial}:{id.FileIdHigh}:{id.FileIdLow}";
+
+    // ---------------------------------------------------------------- 删除传播
+
+    /// <summary>
+    /// **双向删除传播**(2026-09-13 产品决策:删除要双向传播、一致优先、**两端都不弹确认**)。
+    ///
+    /// 返回本轮两端删除的文件数。
+    ///
+    /// 安全性不靠"问用户",而靠**信号完整性**——凡是"看不见"都可能只是"读不到",
+    /// 而服务端删除是**硬删、无回收站**,误判一次就是真删:
+    ///   ① 本机扫描**截断**时整轮不删(`DirectoryScanner.MaxEntries` 超限是静默 break);
+    ///   ② 同步根不可达(盘符变化/网络盘掉线)时整轮不删;
+    ///   ③ 待删文件所在目录**不可枚举**时不删那一个(`IgnoreInaccessible = true` 会静默跳过读不了的目录,
+    ///      于是"权限抖动"看起来和"文件被删了"一模一样);
+    ///   ④ 删除**一律按 file_id**(`FileApi.DeleteAsync` 的注释说明了为什么不能按名字)。
+    /// 远端侧不需要额外放宽:`WalkAsync` 遇到错误会抛异常而不是返回短列表,所以"列完了"本身可信。
+    /// </summary>
+    private async Task<int> PropagateDeletionsAsync(
+        string spaceId,
+        Dictionary<string, EntryView> remote,
+        (Dictionary<string, string> NewToOld, HashSet<string> OldPaths) renames,
+        CancellationToken ct)
+    {
+        // ---- 信号完整性(本地)----
+        if (!Directory.Exists(LongPath.ToExtended(_config.SyncRoot)))
+        {
+            Notice?.Invoke("删除传播:本轮跳过 —— 同步根不存在(盘符变化/网络盘掉线),不能据此认定删除");
+            return 0;
+        }
+        // **同步根身份保护**(最外层,也是最关键的一道):
+        // 同步根被重建(不存在时 StartAsync 会自动建一个空目录)、或盘符/挂载点换了地方时,
+        // 本地文件会"全部消失" —— 那与"用户把文件删光了"在扫描结果上一模一样。
+        // 身份(卷序列号 + 根目录 FileId)能区分:重建/换盘 ⇒ 新的 FileId。
+        // 身份变了就**整轮不传播删除**,并如实告诉用户该怎么办。
+        if (!RootIdentityUnchanged())
+        {
+            return 0;
+        }
+        var scanner = new DirectoryScanner();
+        var raw = scanner.Scan(_config.SyncRoot, recursive: true);
+        if (raw.Count >= scanner.MaxEntries)
+        {
+            Notice?.Invoke($"删除传播:本轮跳过 —— 本机文件数达到扫描上限 {scanner.MaxEntries},扫描被**截断**,不能据此认定删除");
+            return 0;
+        }
+        var localFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in raw)
+        {
+            if (e.IsDirectory)
+            {
+                continue;
+            }
+            var rel = Path.GetRelativePath(_config.SyncRoot, e.Path).Replace('\\', '/');
+            if (rel.EndsWith(".part", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            localFiles.Add(rel);
+        }
+
+        var deleted = 0;
+
+        // ---- ① 远端已无 → 删本地 ----
+        foreach (var (fileId, rel, _) in KnownRows())
+        {
+            ct.ThrowIfCancellationRequested();
+            _ = fileId;
+            if (remote.ContainsKey(rel) || renames.OldPaths.Contains(rel))
+            {
+                continue;
+            }
+            var local = LocalOf(rel);
+            if (!File.Exists(LongPath.ToExtended(local)))
+            {
+                RemoveStateRow(rel); // 两端都没有:清掉状态行,这不是一次"删除动作"
+                continue;
+            }
+            if (!ParentEnumerable(local))
+            {
+                Notice?.Invoke($"删除传播:跳过 {rel} —— 所在目录当前不可枚举(权限/网络问题,不是删除)");
+                continue;
+            }
+            try
+            {
+                File.Delete(LongPath.ToExtended(local));
+                RemoveStateRow(rel);
+                RemoveStatus(rel);
+                deleted++;
+                Notice?.Invoke($"删除:远端已删除 {rel},本地副本已同步删除");
+            }
+            catch (Exception ex)
+            {
+                Notice?.Invoke($"删除本地副本失败 {rel}:{ex.Message}(下一轮再试)");
+            }
+        }
+
+        // ---- ② 本地已无 → 删远端 ----
+        // 重新取一次状态行:①可能刚删掉若干行。
+        //
+        // 两条必须排除的情况(都会踩坏别的功能):
+        //   · `renames.OldPaths.Contains(rel)`:这一行是**本地改名的旧路径** —— 不排除的话
+        //     改名会被我们拆成"删远端 + 传新文件"(改名复用的成果当场作废);
+        //   · 远端版本**比我们已知的新**:两端都变了(本地删、远端改),没有 tombstone 时
+        //     无法裁决成"用户预期"的那个。这里选**远端更新优先**(下载回来),
+        //     因为"删掉别人刚写的数据"是两种错误里更不可逆的那个;用户看到文件回来了可以再删一次。
+        var rows = KnownRows();
+        var candidates = new List<(string FileId, string Rel)>();
+        foreach (var (fileId, rel, knownVersion) in rows)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (localFiles.Contains(rel) || renames.NewToOld.ContainsKey(rel) || renames.OldPaths.Contains(rel))
+            {
+                continue;
+            }
+            if (remote.TryGetValue(rel, out var remoteEntry) && remoteEntry.version > knownVersion)
+            {
+                continue; // 远端也改了:让下载阶段把它拉回来(记在文档里)
+            }
+            if (!ParentEnumerable(LocalOf(rel)))
+            {
+                Notice?.Invoke($"删除传播:跳过 {rel} —— 所在目录当前不可枚举(权限/网络问题,不是删除)");
+                continue;
+            }
+            candidates.Add((fileId, rel));
+        }
+
+        // 说明:**不**给"一次消失一大片"加延迟确认。原因有二:
+        //   ① 产品决策是"一致优先、无条件"——删 100 个文件和删 1 个文件同等对待;
+        //   ② 试过之后发现那条路自相矛盾:本轮"只标记不删",下载阶段又会把远端还在的文件
+        //      拉回本地(本地文件"回来了"),下一轮便不再有候选 —— 延迟确认永远无法落地。
+        // 真正的保护落在**同步根身份**(RootIdentityUnchanged):换盘/根被重建会得到新的 FileId,
+        // 那种情况下整轮不删。这是实测出来的结论(见检查器 ⑦ 的"硬保护"一节)。
+        foreach (var (fileId, rel) in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await _files.DeleteAsync(fileId, ct).ConfigureAwait(false);
+                RemoveStateRow(rel);
+                RemoveStatus(rel);
+                // **快照也要跟着更新**:`remote` 是本轮开头列的,里面还有这一条;
+                // 不删掉的话随后的下载阶段会把我们刚删掉的远端文件**再下载回来**。
+                remote.Remove(rel);
+                deleted++;
+                Notice?.Invoke($"删除:本地已删除 {rel},远端已同步删除");
+            }
+            catch (Exception ex)
+            {
+                // 404 = 远端已经没有了(别人先删了、或别人删了又建了同名新文件):
+                // 那不是错误,清掉状态行即可。
+                // ⚠ **不要动 `remote` 快照**:名字现在可能已经属于**另一端刚建的新文件**
+                // (新的 file id)—— 把快照里那条抹掉,轮内就不会再把它当新文件下载下来。
+                if (ex is ApiException api && api.Status == System.Net.HttpStatusCode.NotFound)
+                {
+                    RemoveStateRow(rel);
+                    RemoveStatus(rel);
+                    continue;
+                }
+                Notice?.Invoke($"删除远端失败 {rel}:{ex.Message}(下一轮再试)");
+            }
+        }
+
+        return deleted;
+    }
+
+    /// <summary>本空间的同步状态行(file_id + 本地相对路径 + 已知远端版本)。</summary>
+    private List<(string FileId, string LocalPath, long RemoteVersion)> KnownRows()
+    {
+        var list = new List<(string, string, long)>();
+        using var cmd = _store.Connection.CreateCommand();
+        cmd.CommandText = "SELECT file_id, local_path, remote_version FROM sync_state WHERE space_id=$s";
+        cmd.Parameters.AddWithValue("$s", _config.SpaceId);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            list.Add((reader.GetString(0), reader.GetString(1), reader.GetInt64(2)));
+        }
+        return list;
+    }
+
+    /// <summary>sync_meta 里记"这个状态库属于哪个同步根"。</summary>
+    private const string RootIdentityKey = "root_identity";
+
+    /// <summary>
+    /// 取**同步根目录**的身份。
+    ///
+    /// 注意不能复用 <see cref="IdentityOf"/>:那个用 `File.Exists` 判存在,对**目录**永远返回 null
+    /// (实测踩到:根身份保护因此静默失效,空目录照样把远端删了)。
+    /// </summary>
+    private FileIdentity? RootIdentity()
+    {
+        try
+        {
+            var ext = LongPath.ToExtended(_config.SyncRoot);
+            return Directory.Exists(ext) ? _identity.TryGet(_config.SyncRoot) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 同步根身份是否**没变**。
+    ///
+    /// 首次调用(库里没记)会把当前身份写下来并返回 true;之后若不一致就返回 false
+    /// (调用方据此放弃删除传播)。身份取不到(网络盘/权限)→ 返回 true 但**说明保护失效** ——
+    /// 宁可不挡,也不能因为取不到身份就把正常删除永远堵死(那是"不能判定 ≠ 通过"的镜像:
+    /// 这里选择"取不到就不挡",并把这一点如实写在文档里)。
+    /// </summary>
+    private bool RootIdentityUnchanged()
+    {
+        var idn = RootIdentity();
+        if (idn is null)
+        {
+            return true; // 取不到身份:这道保护不生效(已记入文档)
+        }
+        var current = FormatIdentity(idn.Value);
+        var recorded = _store.Scalar("SELECT value FROM sync_meta WHERE key=$k", ("k", RootIdentityKey));
+        if (recorded is null or DBNull || string.IsNullOrEmpty(Convert.ToString(recorded)))
+        {
+            _store.Execute("INSERT INTO sync_meta(key, value) VALUES($k, $v) " +
+                           "ON CONFLICT(key) DO UPDATE SET value=$v",
+                ("k", RootIdentityKey), ("v", current));
+            return true;
+        }
+        if (Convert.ToString(recorded) == current)
+        {
+            return true;
+        }
+        Notice?.Invoke("删除传播:本轮跳过 —— **同步根身份变了**(盘符/挂载点变化,或根目录被重建):" +
+                       "本地看起来「什么都没有」,但这不等于用户删了文件。请确认同步目录是否还在原位置;" +
+                       "若确实换了位置,删掉状态库(%APPDATA%\\NetDisk\\state.db)后重新登录即可继续同步");
+        return false;
+    }
+
+    private void RemoveStateRow(string rel) =>
+        _store.Execute("DELETE FROM sync_state WHERE local_path=$p", ("p", rel));
+
+    /// <summary>从状态列表里去掉一条(文件在两端都不存在了,列表只显示存在的东西)。</summary>
+    private void RemoveStatus(string rel)
+    {
+        lock (_gate)
+        {
+            var i = _status.FindIndex(s => string.Equals(s.RelativePath, rel, StringComparison.OrdinalIgnoreCase));
+            if (i >= 0)
+            {
+                _status.RemoveAt(i);
+                StatusChanged?.Invoke(_status.ToArray());
+            }
+        }
+    }
+
+    /// <summary>
+    /// 该路径所在目录**当前是否可枚举**。
+    ///
+    /// 这是"看不见 ≠ 被删除"的关键防线:扫描器把读不了的目录**静默跳过**
+    /// (`IgnoreInaccessible = true`),于是权限抖动、ACL 变更、网络盘卡顿在扫描结果里
+    /// 与"用户删了这些文件"完全一样。要删之前先问一句"这个目录现在还读得到吗";
+    /// 读不到就不删(下一轮再说)。父目录本身不存在时(用户删了整个目录)也返回 false,
+    /// 交给下一轮(那时若同步根仍可达、父目录仍未出现,会走同一条路径,行为一致且不误删)。
+    /// </summary>
+    private static bool ParentEnumerable(string localPath)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(localPath);
+            if (string.IsNullOrEmpty(dir))
+            {
+                return true;
+            }
+            var ext = LongPath.ToExtended(dir);
+            if (!Directory.Exists(ext))
+            {
+                return false; // 目录本身也没了:本轮不删,下一轮再判(宁可慢一轮,不可误删)
+            }
+            using var e = Directory.EnumerateFileSystemEntries(ext).GetEnumerator();
+            return e.MoveNext() || true; // 只要"能开始枚举"就算可读(空目录也算可读)
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
 
     private void SaveState(EntryView e, string rel, string local)
     {

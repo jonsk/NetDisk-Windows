@@ -263,6 +263,20 @@ public sealed class FileApi
     //   upload/create 增加 allow_overwrite → TUS 定稿时原地生成新版本(同一 file id)。
     // 现已落地(契约 + 迁移 00013 + 服务端 + 客户端 flag),覆盖走 UploadAsync(..., allowOverwrite: true)。
 
+    /// <summary>
+    /// 删除一个条目(契约 <c>DELETE /api/v1/files/{id}</c>)。
+    ///
+    /// ⚠ **必须按 file_id 删,绝不按名字删**。这是双向删除能安全工作的前提:
+    /// 用户在这一端删掉 X 的同时,另一端可能刚新建了一个**同名**的 X'(新的 file id)。
+    /// 按名字删会误杀对方刚建的文件;按 id 删只删"我们确实知道的那一份",
+    /// 与"复活的一律当新文件"这条语义天然一致。
+    ///
+    /// 服务端是**硬删**(契约原文:硬删,无回收站;目录删整棵子树),所以调用方
+    /// 必须先通过"信号完整性"检查(见 SyncHost 的删除分支),不能凭一次不可信的观察就删。
+    /// </summary>
+    public Task<DeleteResult> DeleteAsync(string fileId, CancellationToken ct = default) =>
+        _api.DeleteAsync<DeleteResult>($"/api/v1/files/{Uri.EscapeDataString(fileId)}", ct);
+
     /// <summary>按相对空间根的路径找条目(MVP:逐级列出定位)。</summary>
     public async Task<EntryView?> FindByRelativePathAsync(
         string spaceId, string relativePath, CancellationToken ct = default)

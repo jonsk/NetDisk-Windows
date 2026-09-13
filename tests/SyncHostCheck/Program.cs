@@ -299,43 +299,42 @@ try
             File.Exists(Path.Combine(root, name2)) ? "本地仍残留旧名字(下载阶段把它拉回来了)" : "本地缺新名字");
     }
 
-    // ------------------------------------------------ ⑦ 删除方向(实测:两端都删不掉)
-    // 目标里没有"删除"这一条(MVP 只承诺 新增/修改/改名),但代码路径会给出两个
-    // **反直觉**的结果,必须实测记录而不是留给用户去发现:
-    //   · 本地删掉文件 → 对账第一阶段发现"远端有、本地没有" → **重新下载回来**;
-    //   · 远端删掉文件 → 对账第二阶段发现"本地有、远端没有" → **当新文件重新上传**。
-    // 合起来就是:用户删不掉任何文件,而别人删掉的文件会自己回来。数据不丢(没有损坏),
-    // 但"删除"这个最基本的文件操作在当前客户端上**不成立**。
-    // 本节不断言"应该怎样"(那是产品决策),只断言**不崩、内容不坏**,并把事实打印出来。
+    // ------------------------------------------------ ⑦ 删除传播(双向,无用户确认)
+    // 产品决策(2026-09-13):**删除要双向传播、一致优先、两端都不弹确认**。
+    // 安全性不靠"问用户",而靠**信号完整性**(见 SyncHost.PropagateDeletionsAsync):
+    // 扫描截断 / 同步根不可达 / 待删文件所在目录不可枚举 → 整轮或个人不删;
+    // 并且**一律按 file_id 删**(按名字删会误杀另一端刚建的同名新文件)。
     Console.WriteLine();
-    Console.WriteLine("— ⑦ 删除方向(实测当前行为)");
+    Console.WriteLine("— ⑦ 删除传播(双向)");
     var nameLocalDel = $"sync-check-{DateTime.Now:HHmmss}-localdel.txt";
     var nameRemoteDel = $"sync-check-{DateTime.Now:HHmmss}-remotedel.txt";
-    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
+    var nameSameNew = $"sync-check-{DateTime.Now:HHmmss}-samename.txt";
+    // ⚠ ⑦ 的宿主**关掉本地监听**:这一段会手工删/建文件,而 watcher 会在后台自己触发对账,
+    // 两边抢同一个同步根 + 同一个状态库 → 断言变成时序抽奖(实测:同一份代码时红时绿)。
+    // 删除传播的正确性要靠**显式驱动**的对账来判定;监听路径本身由 ①~⑥ 覆盖。
+    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false))
     {
         await host.StartAsync();
         await host.ReconcileAsync();
         await File.WriteAllTextAsync(Path.Combine(root, nameLocalDel), "local-delete-me");
         await File.WriteAllTextAsync(Path.Combine(root, nameRemoteDel), "remote-delete-me");
+        await File.WriteAllTextAsync(Path.Combine(root, nameSameNew), "old-content");
         await host.ReconcileAsync();
-        Check("⑦ 前提:两个文件都已上传",
+        Check("⑦ 前提:三个文件都已上传",
             await files.FindByNameAsync(space.id, null, nameLocalDel) is not null &&
-            await files.FindByNameAsync(space.id, null, nameRemoteDel) is not null);
+            await files.FindByNameAsync(space.id, null, nameRemoteDel) is not null &&
+            await files.FindByNameAsync(space.id, null, nameSameNew) is not null);
 
-        // ① 本地删除
+        // ① 本地删除 → **远端也要删掉**(不再复活)
         File.Delete(Path.Combine(root, nameLocalDel));
         await host.ReconcileAsync();
-        var cameBackLocal = File.Exists(Path.Combine(root, nameLocalDel));
-        var stillRemote = await files.FindByNameAsync(space.id, null, nameLocalDel);
-        Console.WriteLine(cameBackLocal
-            ? "    本地删除后:文件被**重新下载回来**(本地删除未生效/未上报)"
-            : "    本地删除后:文件保持删除状态");
-        Check("⑦ 本地删除不会损坏内容(回来时内容一致)",
-            !cameBackLocal ||
-            await File.ReadAllTextAsync(Path.Combine(root, nameLocalDel)) == "local-delete-me",
-            "重新下载的内容应逐字节一致");
+        Check("⑦ 本地删除传播到远端(远端不再有该文件)",
+            await files.FindByNameAsync(space.id, null, nameLocalDel) is null,
+            "远端仍有该文件 = 删除没传播");
+        Check("⑦ 本地删除后本地也不会被重新下载回来",
+            !File.Exists(Path.Combine(root, nameLocalDel)));
 
-        // ② 远端删除
+        // ② 远端删除 → **本地也要删掉**
         var remoteEntry = await files.FindByNameAsync(space.id, null, nameRemoteDel);
         if (remoteEntry is not null)
         {
@@ -344,17 +343,145 @@ try
                 contentFactory: null, headers: null, idempotent: true);
             Console.WriteLine($"    远端删除 {nameRemoteDel} → {(int)del.StatusCode}");
             await host.ReconcileAsync();
-            var reuploaded = await files.FindByNameAsync(space.id, null, nameRemoteDel);
-            Console.WriteLine(reuploaded is not null
-                ? "    远端删除后:文件被**重新上传**(远端删除会被客户端「复活」)"
-                : "    远端删除后:文件保持已删除");
-            Check("⑦ 远端删除被复活时内容不损坏",
-                reuploaded is null ||
-                await File.ReadAllTextAsync(Path.Combine(root, nameRemoteDel)) == "remote-delete-me",
-                "复活后的内容应逐字节一致");
+            Check("⑦ 远端删除传播到本地(本地副本被删掉)",
+                !File.Exists(Path.Combine(root, nameRemoteDel)),
+                "本地仍在 = 远端删除没传播");
+            Check("⑦ 远端删除后本地不会被重新上传(远端仍无该文件)",
+                await files.FindByNameAsync(space.id, null, nameRemoteDel) is null,
+                "远端又出现了 = 客户端把已删文件复活了");
         }
-        Console.WriteLine("    结论:当前客户端**不支持删除**(本地删不掉、远端删了会回来);" +
-                          "这是 MVP 明确的范围外项,已在文档登记。");
+
+        // ③ **按 id 删 + 复活当新文件**:另一端"删了又建同名"(真正的**新 file id**)时,
+        //    我们的删除只能删自己知道的那一份,新文件必须活下来并被当新文件下载到本地。
+        //    注意:同名**覆盖**(allow_overwrite)是原地升版本、id 不变,造不出"新 id";
+        //    要造新 id 必须先删再传(这也正是另一端"删了又建"的真实形态)。
+        var oldSame = await files.FindByNameAsync(space.id, null, nameSameNew);
+        if (oldSame is not null)
+        {
+            using (var delSame = await api.SendRawAsync(HttpMethod.Delete,
+                       $"/api/v1/files/{Uri.EscapeDataString(oldSame.id)}",
+                       contentFactory: null, headers: null, idempotent: true))
+            {
+                Console.WriteLine($"    另一端先删掉 {nameSameNew} → {(int)delSame.StatusCode}");
+            }
+            var stagingSame = Path.Combine(work, "same-name-new.txt");
+            await File.WriteAllTextAsync(stagingSame, "new-content-from-other-end");
+            await files.UploadAsync(space.id, null, nameSameNew, stagingSame);
+            var newSame = await files.FindByNameAsync(space.id, null, nameSameNew);
+            Check("⑦ 另一端「删了又建同名」拿到了新的 file id",
+                newSame is not null && newSame.id != oldSame.id,
+                $"old={oldSame.id} new={newSame?.id}");
+
+            // 本地也删掉(与另一端并发):我们只知道旧 id
+            File.Delete(Path.Combine(root, nameSameNew));
+            await host.ReconcileAsync();
+            var afterSame = await files.FindByNameAsync(space.id, null, nameSameNew);
+            Check("⑦ 删除只删自己知道的那一份(file id),不误杀同名新文件",
+                afterSame is not null && afterSame.id == newSame!.id,
+                afterSame is null ? "同名新文件被误删了(说明按名字删了)" : $"id 变了:{afterSame.id}");
+            // 复活的一律当新文件 → 它的内容应当被下载到本地
+            var localSame = Path.Combine(root, nameSameNew);
+            Check("⑦ 复活的一律当新文件(本地拿到另一端的新内容)",
+                File.Exists(localSame) &&
+                await File.ReadAllTextAsync(localSame) == "new-content-from-other-end",
+                File.Exists(localSame) ? "内容不是新那一版" : "本地没有该文件");
+        }
+    }
+
+    // ④ **硬保护**:同步根不可达时(盘符变化/网络盘掉线)**绝不能**把远端删光
+    //    这是删除功能最危险的一条:本机扫描返回空集,与"用户把文件全删了"完全一样。
+    {
+        var guardName = $"sync-check-{DateTime.Now:HHmmss}-guard.txt";
+        await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false))
+        {
+            await host.StartAsync();
+            await host.ReconcileAsync();
+            await File.WriteAllTextAsync(Path.Combine(root, guardName), "must-survive");
+            await host.ReconcileAsync();
+            Check("⑦ 硬保护:前提文件已上传",
+                await files.FindByNameAsync(space.id, null, guardName) is not null);
+        }
+        var moved = root + "-moved";
+        Directory.Move(root, moved);
+        try
+        {
+            await using var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false);
+            await host.StartAsync();
+            await host.ReconcileAsync();
+        }
+        catch (Exception ex)
+        {
+            // 同步根不存在时对账报错是**可以接受**的(总比删光好);关键是下面的断言
+            Console.WriteLine($"    (同步根不可达时对账报错,可接受:{ex.GetType().Name})");
+        }
+        Check("⑦ 硬保护:同步根不可达时**没有**把远端文件删掉",
+            await files.FindByNameAsync(space.id, null, guardName) is not null,
+            "远端文件被删了 = 保护失效(最危险的一类误删)");
+        // 还原:同步根**可能已被 StartAsync 重建为一个空目录**(那正是这道保护的起因),
+        // 于是要先清掉它再搬回来,否则 Move 会因为"目标已存在"抛异常。
+        // ⚠ 必须**真的**还原:被重建的那个目录拿到了**新的 FileId**,而状态库里记的是原根身份 ——
+        // 不还原的话,后续场景会被身份保护正确地挡住(实测:整批删除"没传播",其实是保护在生效)。
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+        Directory.Move(moved, root); // 还原,后续清理照常
+    }
+
+    // ⑤ **整批删除也要立即传播**(一致优先,不做"消失一大片就先等等"的延迟确认)。
+    //
+    // 为什么不做延迟确认(试过之后的结论):
+    //   · 产品决策是"一致优先、无条件"——删 100 个文件和删 1 个文件同等对待;
+    //   · 那条路本身自相矛盾:本轮"只标记不删",下载阶段又会把远端还在的文件拉回本地,
+    //     下一轮便不再有候选 —— 延迟确认永远落不了地(实测:第二轮远端仍剩 5/5)。
+    // 真正的保护是**同步根身份**(见上一节的硬保护):换盘/根被重建 ⇒ 新的 FileId ⇒ 整轮不删。
+    {
+        var massPrefix = $"sync-check-{DateTime.Now:HHmmss}-mass";
+        const int massCount = 5;
+        var massNames = new List<string>();
+        await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false))
+        {
+            await host.StartAsync();
+            await host.ReconcileAsync();
+            for (var i = 0; i < massCount; i++)
+            {
+                var n = $"{massPrefix}-{i:D3}.txt";
+                massNames.Add(n);
+                await File.WriteAllTextAsync(Path.Combine(root, n), $"mass-{i}");
+            }
+            // 前提必须**真的**成立:有界重试直到全部传上去(排队是异步的,单次对账不保证排空)
+            var uploaded = 0;
+            for (var attempt = 0; attempt < 10 && uploaded < massCount; attempt++)
+            {
+                await host.ReconcileAsync();
+                uploaded = 0;
+                foreach (var n in massNames)
+                {
+                    if (await files.FindByNameAsync(space.id, null, n) is not null)
+                    {
+                        uploaded++;
+                    }
+                }
+            }
+            Check($"⑦ 整批删除:前提 {massCount} 个文件都已上传", uploaded == massCount, $"实际上传 {uploaded}");
+
+            // 整批本地删除 → 一轮对账内全部传播
+            foreach (var n in massNames)
+            {
+                File.Delete(Path.Combine(root, n));
+            }
+            await host.ReconcileAsync();
+            var remaining = 0;
+            foreach (var n in massNames)
+            {
+                if (await files.FindByNameAsync(space.id, null, n) is not null)
+                {
+                    remaining++;
+                }
+            }
+            Check("⑦ 整批删除立即传播(一致优先,不做延迟确认)",
+                remaining == 0, $"远端还剩 {remaining}/{massCount}");
+        }
     }
 }
 finally
