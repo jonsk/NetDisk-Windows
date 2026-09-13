@@ -298,6 +298,64 @@ try
             File.Exists(localNew) && !File.Exists(Path.Combine(root, name2)),
             File.Exists(Path.Combine(root, name2)) ? "本地仍残留旧名字(下载阶段把它拉回来了)" : "本地缺新名字");
     }
+
+    // ------------------------------------------------ ⑦ 删除方向(实测:两端都删不掉)
+    // 目标里没有"删除"这一条(MVP 只承诺 新增/修改/改名),但代码路径会给出两个
+    // **反直觉**的结果,必须实测记录而不是留给用户去发现:
+    //   · 本地删掉文件 → 对账第一阶段发现"远端有、本地没有" → **重新下载回来**;
+    //   · 远端删掉文件 → 对账第二阶段发现"本地有、远端没有" → **当新文件重新上传**。
+    // 合起来就是:用户删不掉任何文件,而别人删掉的文件会自己回来。数据不丢(没有损坏),
+    // 但"删除"这个最基本的文件操作在当前客户端上**不成立**。
+    // 本节不断言"应该怎样"(那是产品决策),只断言**不崩、内容不坏**,并把事实打印出来。
+    Console.WriteLine();
+    Console.WriteLine("— ⑦ 删除方向(实测当前行为)");
+    var nameLocalDel = $"sync-check-{DateTime.Now:HHmmss}-localdel.txt";
+    var nameRemoteDel = $"sync-check-{DateTime.Now:HHmmss}-remotedel.txt";
+    await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath))
+    {
+        await host.StartAsync();
+        await host.ReconcileAsync();
+        await File.WriteAllTextAsync(Path.Combine(root, nameLocalDel), "local-delete-me");
+        await File.WriteAllTextAsync(Path.Combine(root, nameRemoteDel), "remote-delete-me");
+        await host.ReconcileAsync();
+        Check("⑦ 前提:两个文件都已上传",
+            await files.FindByNameAsync(space.id, null, nameLocalDel) is not null &&
+            await files.FindByNameAsync(space.id, null, nameRemoteDel) is not null);
+
+        // ① 本地删除
+        File.Delete(Path.Combine(root, nameLocalDel));
+        await host.ReconcileAsync();
+        var cameBackLocal = File.Exists(Path.Combine(root, nameLocalDel));
+        var stillRemote = await files.FindByNameAsync(space.id, null, nameLocalDel);
+        Console.WriteLine(cameBackLocal
+            ? "    本地删除后:文件被**重新下载回来**(本地删除未生效/未上报)"
+            : "    本地删除后:文件保持删除状态");
+        Check("⑦ 本地删除不会损坏内容(回来时内容一致)",
+            !cameBackLocal ||
+            await File.ReadAllTextAsync(Path.Combine(root, nameLocalDel)) == "local-delete-me",
+            "重新下载的内容应逐字节一致");
+
+        // ② 远端删除
+        var remoteEntry = await files.FindByNameAsync(space.id, null, nameRemoteDel);
+        if (remoteEntry is not null)
+        {
+            using var del = await api.SendRawAsync(HttpMethod.Delete,
+                $"/api/v1/files/{Uri.EscapeDataString(remoteEntry.id)}",
+                contentFactory: null, headers: null, idempotent: true);
+            Console.WriteLine($"    远端删除 {nameRemoteDel} → {(int)del.StatusCode}");
+            await host.ReconcileAsync();
+            var reuploaded = await files.FindByNameAsync(space.id, null, nameRemoteDel);
+            Console.WriteLine(reuploaded is not null
+                ? "    远端删除后:文件被**重新上传**(远端删除会被客户端「复活」)"
+                : "    远端删除后:文件保持已删除");
+            Check("⑦ 远端删除被复活时内容不损坏",
+                reuploaded is null ||
+                await File.ReadAllTextAsync(Path.Combine(root, nameRemoteDel)) == "remote-delete-me",
+                "复活后的内容应逐字节一致");
+        }
+        Console.WriteLine("    结论:当前客户端**不支持删除**(本地删不掉、远端删了会回来);" +
+                          "这是 MVP 明确的范围外项,已在文档登记。");
+    }
 }
 finally
 {
