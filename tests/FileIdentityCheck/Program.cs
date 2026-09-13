@@ -23,7 +23,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑥ 大小不同 → 直接判否(连哈希都不算)", CheckSizeMismatchAsync),
     ("⑦ 身份不可用且没有哈希能力 → 保守判否(宁可重传不可错判)", CheckNoHashAvailableAsync),
     ("⑧ 真实 Win32:改名前后文件身份不变", CheckRealIdentityAcrossRenameAsync),
-    ("⑨ 真实 Win32:两个不同文件身份不同;目录也能取到身份", CheckRealIdentityDistinctAsync),
+    ("⑨ 真实 Win32:两个不同文件身份不同;目录身份**跨改名不变**且互不相同", CheckRealIdentityDistinctAsync),
 };
 
 var failed = 0;
@@ -215,8 +215,26 @@ static Task CheckRealIdentityDistinctAsync()
         // 目录也要能取到身份:重命名目录同样不能触发整棵子树重传
         var dir = Path.Combine(root, "d1");
         Directory.CreateDirectory(dir);
-        Assert(provider.TryGet(dir) is not null,
+        var idDir = provider.TryGet(dir);
+        Assert(idDir is not null,
             "目录也必须能取到身份(重命名目录不该让整棵子树重传)");
+
+        // 目录身份必须**跨改名/移动不变** —— 这是"目录级改名/移动传播"(SyncHost.DetectDirRenames)
+        // 的唯一判据。少了这条,那个功能就只能靠"看起来对"来交付:
+        // 一旦身份在改名后变了,引擎会把一次文件夹改名当成"删掉整棵子树 + 重新上传一堆文件"。
+        var dirMoved = Path.Combine(root, "d2");
+        Directory.Move(dir, dirMoved);
+        var idDirMoved = provider.TryGet(dirMoved);
+        Assert(idDirMoved is not null, "目录改名后仍应能取到身份");
+        Assert(idDir!.Value.Equals(idDirMoved!.Value),
+            "同卷内目录改名后身份必须不变 —— 这正是「文件夹改名不重传整棵子树」的依据");
+
+        // 两个不同目录的身份必须不同(否则会把 A 的改名认成 B 的)
+        var dirOther = Path.Combine(root, "d3");
+        Directory.CreateDirectory(dirOther);
+        var idDirOther = provider.TryGet(dirOther);
+        Assert(idDirOther is not null && !idDirOther.Value.Equals(idDirMoved.Value),
+            "不同目录的身份必须不同(否则会把 A 的改名认到 B 头上)");
 
         // 不存在的路径 → null(而不是抛异常)
         Assert(provider.TryGet(Path.Combine(root, "missing.bin")) is null, "不存在的路径应返回 null");

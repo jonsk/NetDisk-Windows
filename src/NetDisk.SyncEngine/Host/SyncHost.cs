@@ -1069,6 +1069,26 @@ public sealed class SyncHost : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 取**目录**身份(卷序列号 + FileId)。同一卷内改名/移动后 FileId 不变 —— 目录改名
+    /// 靠它识别,否则一次"文件夹改个名"会被当成"删掉整棵子树 + 重新上传一遍"。
+    ///
+    /// 不能复用 <see cref="IdentityOf"/>:那个用 <c>File.Exists</c> 判存在,对目录永远返回 null
+    /// (与同步根身份同一个坑,见 <see cref="RootIdentity"/>)。底层 Win32 取句柄时带
+    /// `FILE_FLAG_BACKUP_SEMANTICS`,所以对目录同样有效。
+    /// </summary>
+    private FileIdentity? DirIdentityOf(string local)
+    {
+        try
+        {
+            return Directory.Exists(LongPath.ToExtended(local)) ? _identity.TryGet(local) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     private static string FormatIdentity(in FileIdentity id) =>
         $"{id.VolumeSerial}:{id.FileIdHigh}:{id.FileIdLow}";
 
@@ -1105,15 +1125,86 @@ public sealed class SyncHost : IAsyncDisposable
     }
 
     /// <summary>记下目录的远端 id(<c>dir:&lt;rel&gt;</c> 作为状态库里的"路径")。</summary>
-    private void SaveDirState(string rel, string dirId) =>
+    /// <remarks>
+    /// 同时记下**目录自己的身份**(卷序列号 + FileId):目录改名识别要用它。
+    /// 与 <see cref="SaveState"/> 同一套写法 —— 身份取不到时**不要覆盖**已记的值
+    /// (取不到只是这一轮读不到,不代表它变成了别的目录)。
+    /// </remarks>
+    private void SaveDirState(string rel, string dirId)
+    {
+        var idn = DirIdentityOf(LocalOf(rel));
         _store.Execute(
             """
             INSERT INTO sync_state(file_id, space_id, local_path, remote_version, local_mtime_ticks, size, hash_sha256, state, updated_at_utc, local_identity)
-            VALUES ($id, $space, $p, 0, 0, 0, '', 'InSync', $now, '')
-            ON CONFLICT(file_id) DO UPDATE SET local_path=$p, updated_at_utc=$now
+            VALUES ($id, $space, $p, 0, 0, 0, '', 'InSync', $now, $idn)
+            ON CONFLICT(file_id) DO UPDATE SET local_path=$p, updated_at_utc=$now,
+                local_identity=CASE WHEN $idn='' THEN local_identity ELSE $idn END
             """,
             ("id", dirId), ("space", _config.SpaceId), ("p", "dir:" + rel),
+            ("idn", idn is null ? "" : FormatIdentity(idn.Value)),
             ("now", _clock.GetUtcNow().ToString("O")));
+    }
+
+    /// <summary>
+    /// 本地**目录改名/移动**识别:新路径 → 旧路径。
+    ///
+    /// 判据与文件改名同源(DE-D-11):同一卷内改名/移动后**目录自己的 FileId 不变**。
+    /// 只有"状态库里记过身份、而那个旧路径本地已经不在了"的目录才有资格作为旧路径 ——
+    /// 否则"A 还在、用户又建了一个 A 的副本"会被误判成改名。
+    ///
+    /// 取不到身份(非 NTFS/网络盘/权限)时**保守返回空**:那时退回"当新目录建 + 不删远端旧目录"
+    /// (即本轮之前的行为),不会误删数据,只是远端会留一个旧目录(已记入文档)。
+    /// </summary>
+    private Dictionary<string, string> DetectDirRenames(LocalScan scan)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var identities = KnownDirIdentities();
+        if (identities.Count == 0)
+        {
+            return result;
+        }
+        // 身份 → 旧路径;只保留"本地已无"的(本地还在的不可能是被改名带走的)
+        var byIdentity = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (oldRel, idn) in identities)
+        {
+            if (scan.Dirs.Contains(oldRel))
+            {
+                continue;
+            }
+            byIdentity[idn] = oldRel;
+        }
+        if (byIdentity.Count == 0)
+        {
+            return result;
+        }
+        foreach (var rel in scan.Dirs)
+        {
+            if (KnownFileId("dir:" + rel) is not null)
+            {
+                continue; // 这个路径我们认识 → 不是改名
+            }
+            var idn = DirIdentityOf(LocalOf(rel));
+            if (idn is null)
+            {
+                continue;
+            }
+            if (byIdentity.TryGetValue(FormatIdentity(idn.Value), out var oldRel)
+                && !string.Equals(oldRel, rel, StringComparison.OrdinalIgnoreCase))
+            {
+                result[rel] = oldRel;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>`dir:&lt;rel&gt;` 对应的目录身份(只返回记过身份的;用于改名识别)。</summary>
+    private Dictionary<string, string> KnownDirIdentities() =>
+        _store.Query(
+                "SELECT local_path, local_identity FROM sync_state WHERE space_id=$s AND local_path LIKE 'dir:%'",
+                reader => (Path: reader.GetString(0), Identity: reader.GetString(1)),
+                ("$s", _config.SpaceId))
+            .Where(r => !string.IsNullOrEmpty(r.Identity))
+            .ToDictionary(r => r.Path["dir:".Length..], r => r.Identity, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// **目录的新建与删除传播**(2026-09-13)。
@@ -1172,12 +1263,29 @@ public sealed class SyncHost : IAsyncDisposable
             .Where(r => r.LocalPath.StartsWith("dir:", StringComparison.Ordinal))
             .ToList();
 
+        // 目录**改名/移动**识别(2026-09-13):先算出来,再决定"新建"还是"移动"。
+        // 判据是目录自己的 FileId(同卷内改名/移动不变)——与文件改名同源。
+        // 识别不出来的(非 NTFS/网络盘/权限)退回旧行为:当新目录建 + 不删远端旧目录。
+        var dirRenames = DetectDirRenames(scan);
+        // 本轮**成功移动掉**的旧路径:它们不能再参与②的"本地已无 → 删远端子树",
+        // 否则会把我们刚刚移到新位置的**同一个远端目录**删掉(空目录改名时尤其致命:
+        // 没有文件落在 OldPaths 里,那道改名保护根本不会触发)。
+        var movedOldDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // ① 本地新目录 → 远端建目录(只处理状态库里没有记录的目录)
         foreach (var rel in scan.Dirs)
         {
             ct.ThrowIfCancellationRequested();
             if (remoteDirs.Contains(rel) || KnownFileId("dir:" + rel) is not null)
             {
+                continue;
+            }
+            // ①a 先试"这其实是一次目录改名/移动"(远端同一条目换位置,不重传子文件)
+            if (dirRenames.TryGetValue(rel, out var renamedFrom)
+                && await TryMoveDirAsync(rel, renamedFrom, remote, remoteDirs, renames, ct).ConfigureAwait(false))
+            {
+                movedOldDirs.Add(renamedFrom);
+                ops++;
                 continue;
             }
             if (renames.NewToOld.Values.Any(old => old.StartsWith(rel + "/", StringComparison.OrdinalIgnoreCase)))
@@ -1204,6 +1312,10 @@ public sealed class SyncHost : IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var rel = dirPath["dir:".Length..];
+            if (movedOldDirs.Contains(rel))
+            {
+                continue; // 这一轮已经作为"目录改名/移动"处理过了(远端是**同一个**条目,不能删)
+            }
 
             // ② 本地已无 → 远端删子树
             if (!scan.Dirs.Contains(rel))
@@ -1272,6 +1384,116 @@ public sealed class SyncHost : IAsyncDisposable
 
         return ops;
     }
+
+    /// <summary>
+    /// 把一次本地**目录改名/移动**推到远端:调用契约 `POST /api/v1/files/{id}/move`,
+    /// 让服务端**原地换位置**(同一个 file_id),而不是"建新目录 + 删旧子树 + 重传子文件"。
+    ///
+    /// 成功后必须把三处一起**重指向**(漏掉任何一处都会产生可见错误):
+    ///   ① 状态库:该目录行改为新路径(file_id 不变),**旧前缀下的所有行**(子目录行 `dir:` 前缀、
+    ///      子文件行)按前缀改写 —— 否则子文件会被当成"远端有、本地没了"而重新下载回来;
+    ///   ② 本轮远端快照 `remote`:键是相对路径,旧路径下的条目要换成新路径,否则上传阶段会
+    ///      因为"远端没有这个新路径"而重传一次(服务端 409 名冲突);
+    ///   ③ 改名映射 `renames`:被这次目录移动带走的文件不再需要逐个改名(它们已经跟着目录走了),
+    ///      必须从 `NewToOld`/`OldPaths` 里摘掉 —— 否则上传阶段会拿一个**已经不存在**的旧路径
+    ///      去推改名,失败后降级成"重传"。
+    ///
+    /// 返回 false 表示"没处理"(调用方按新建目录继续),并且**不修改任何状态**:
+    /// move 转异步(202)或失败时,下一轮对账会重新判断。
+    /// </summary>
+    private async Task<bool> TryMoveDirAsync(
+        string rel,
+        string oldRel,
+        Dictionary<string, EntryView> remote,
+        HashSet<string> remoteDirs,
+        (Dictionary<string, string> NewToOld, HashSet<string> OldPaths) renames,
+        CancellationToken ct)
+    {
+        var dirId = KnownFileId("dir:" + oldRel);
+        if (string.IsNullOrEmpty(dirId))
+        {
+            return false;
+        }
+        try
+        {
+            // 目标父目录可能也是新目录(把 A 移进刚建的 B 里):先确保它在远端存在。
+            // **顶层条目不能传 null**:契约的 move 要求具体 `parent_id`,空值会被服务端
+            // 拒为「缺少目标目录」(实测第一次跑就是这样);同步起点的远端目录 id 取
+            // `_rootId`(配置里给了父目录时就是它本身)。
+            var parentId = rel.Contains('/')
+                ? await EnsureParentDirAsync(rel, ct).ConfigureAwait(false)
+                : MoveTargetParentId();
+            var newName = Path.GetFileName(rel);
+            Notice?.Invoke($"目录同步:识别为改名/移动 {oldRel} → {rel},按远端 MOVE 处理");
+            var res = await _files.MoveAsync(dirId!, parentId, newName, baseVersion: 0, ct).ConfigureAwait(false);
+            if (res.async || res.entry is null)
+            {
+                // 超阈值转异步任务:条目还在原处,**不能**在这里按"已移动"改本地状态
+                Notice?.Invoke($"目录同步:{oldRel} → {rel} 超过服务端同步阈值,已转异步任务(下一轮对账看结果)");
+                return false;
+            }
+
+            // ① 状态库:目录行改到新路径(同一 file_id),旧前缀下的行整体改写
+            SaveDirState(rel, dirId!);
+            _store.Execute(
+                "UPDATE sync_state SET local_path = $new || substr(local_path, length($old) + 1) " +
+                "WHERE space_id=$s AND local_path LIKE $oldLike",
+                ("new", rel), ("old", oldRel), ("s", _config.SpaceId), ("oldLike", oldRel + "/%"));
+            _store.Execute(
+                "UPDATE sync_state SET local_path = 'dir:' || $new || substr(local_path, length($oldDir) + 1) " +
+                "WHERE space_id=$s AND local_path LIKE $oldDirLike",
+                ("new", rel), ("oldDir", "dir:" + oldRel), ("s", _config.SpaceId),
+                ("oldDirLike", "dir:" + oldRel + "/%"));
+
+            // ② 远端快照:旧路径 → 新路径(只重指向键;条目的 name/parent_id 没变)
+            foreach (var key in remote.Keys
+                         .Where(k => k.StartsWith(oldRel + "/", StringComparison.OrdinalIgnoreCase))
+                         .ToList())
+            {
+                var target = remote[key];
+                remote.Remove(key);
+                remote[rel + key[oldRel.Length..]] = target;
+            }
+            foreach (var dir in remoteDirs.Where(d =>
+                         string.Equals(d, oldRel, StringComparison.OrdinalIgnoreCase)
+                         || d.StartsWith(oldRel + "/", StringComparison.OrdinalIgnoreCase)).ToList())
+            {
+                remoteDirs.Remove(dir);
+                remoteDirs.Add(rel + dir[oldRel.Length..]);
+            }
+
+            // ③ 改名映射:这一段子树已经跟着目录走了,不再逐个改名
+            foreach (var key in renames.NewToOld.Keys
+                         .Where(k => k.StartsWith(rel + "/", StringComparison.OrdinalIgnoreCase)).ToList())
+            {
+                renames.NewToOld.Remove(key);
+            }
+            renames.OldPaths.RemoveWhere(p => p.StartsWith(oldRel + "/", StringComparison.OrdinalIgnoreCase));
+
+            RemoveStatus(oldRel);
+            Upsert(rel, SyncState.InSync, $"已改名/移动(原 {oldRel})", res.entry.version);
+            Notice?.Invoke($"目录同步:{oldRel} → {rel} 已在远端原地移动(同一目录,子文件未重传)");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // 失败不吞:如实报出,并按"新目录"继续处理(数据安全优先 —— 宁可多一个目录,
+            // 也不能让用户以为移动成功了)。旧远端目录由改名保护挡着,不会被误删。
+            Notice?.Invoke($"目录改名/移动失败({oldRel} → {rel}),本轮按新建目录处理:{ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 移动的**目标父目录 id**(顶层条目用)。
+    ///
+    /// 为什么不能像上传那样传 null:契约 `POST /files/{id}/move` 的 `parent_id` 是必须的具体 id,
+    /// 空值会被服务端拒为「缺少目标目录」(真机第一次跑就是这个报错)。
+    /// 同步起点的远端目录 id 记在 `_rootId`(对账开头由"同步起点那一层条目的 parent_id"得到),
+    /// 配置里显式给了父目录时就是它本身。
+    /// </summary>
+    private string? MoveTargetParentId() =>
+        !string.IsNullOrEmpty(_config.ParentId) ? _config.ParentId : _rootId;
 
     /// <summary>删掉某个目录下的所有状态行(含它自己:`dir:&lt;rel&gt;` 与 <c>rel/...</c>)。</summary>
     private void RemoveStateRowsUnder(string rel)

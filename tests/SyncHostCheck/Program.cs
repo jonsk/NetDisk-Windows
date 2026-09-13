@@ -786,22 +786,69 @@ try
                 Directory.Exists(remoteDelPath) ? "本地目录仍在 = 远端删除没传播" : "");
         }
 
-        // ④ **数据安全**:目录改名(暂不支持)绝不能把远端子树当"删除"删掉
+        // ④ **目录改名与移动**(2026-09-13):目录没有"内容"可传,只有"位置"要改 ——
+        //    必须走服务端 MOVE(同一个 file_id),而不是"建新目录 + 删旧子树 + 重传子文件"。
+        //    判据是目录自己的 FileId(同卷内改名/移动不变),与文件改名同源。
+        //    这一节此前只断言"不误删"(当时不支持改名);现在期望升级为"真的改过去了"。
         var renameFrom = $"{dirPrefix}-renamefrom";
+        var renameTo = $"{dirPrefix}-renameto";
         var renameFromPath = Path.Combine(root, renameFrom);
         Directory.CreateDirectory(renameFromPath);
         await File.WriteAllTextAsync(Path.Combine(renameFromPath, "keep.txt"), "must-survive");
         await host.ReconcileAsync();
-        Check("⑫ 改名保护的前提:目录与文件已上传",
-            await files.FindByNameAsync(space.id, null, renameFrom) is not null);
-        Directory.Move(renameFromPath, Path.Combine(root, $"{dirPrefix}-renameto"));
+        var beforeRename = await files.FindByNameAsync(space.id, null, renameFrom);
+        var beforeFile = beforeRename is null ? null : await files.FindByNameAsync(space.id, beforeRename.id, "keep.txt");
+        Check("⑫ 目录改名的前提:目录与文件都已上传", beforeRename is { is_dir: true } && beforeFile is not null);
+
+        Directory.Move(renameFromPath, Path.Combine(root, renameTo));
         await host.ReconcileAsync();
-        var stillThere = await files.FindByNameAsync(space.id, null, renameFrom);
-        Console.WriteLine(stillThere is not null
-            ? "    目录改名后:远端旧目录仍在(目录改名**尚未支持**,但没被误删 —— 这是刻意的保护)"
-            : "    目录改名后:远端旧目录已消失(说明走了删除路径 —— 若如此必须人工确认没有丢数据)");
-        Check("⑫ 目录改名不会导致远端子树被误删(数据安全)", stillThere is not null,
-            stillThere is null ? "远端旧目录被删了 —— 目录改名保护失效(会丢数据)" : "");
+        var afterRename = await files.FindByNameAsync(space.id, null, renameTo);
+        Check("⑫ 目录改名后在远端以新名字出现", afterRename is { is_dir: true },
+            afterRename is null ? "远端没有新名字的目录" : "");
+        Check("⑫ 目录改名复用同一个远端 file id(不是新建)",
+            afterRename is not null && beforeRename is not null && afterRename.id == beforeRename.id,
+            afterRename is null || beforeRename is null ? "缺条目" : $"旧={beforeRename.id} 新={afterRename.id}");
+        Check("⑫ 目录改名后版本递增(服务端原地改,不是新建)",
+            afterRename is not null && beforeRename is not null && afterRename.version > beforeRename.version,
+            afterRename is null || beforeRename is null ? "缺条目" : $"旧={beforeRename.version} 新={afterRename.version}");
+        Check("⑫ 目录改名后旧名字在远端消失(没有残留重复)",
+            await files.FindByNameAsync(space.id, null, renameFrom) is null);
+        var afterFile = afterRename is null ? null : await files.FindByNameAsync(space.id, afterRename.id, "keep.txt");
+        Check("⑫ 子文件跟着目录走:同一个 file id",
+            afterFile is not null && beforeFile is not null && afterFile.id == beforeFile.id,
+            afterFile is null || beforeFile is null ? "缺条目" : $"旧={beforeFile.id} 新={afterFile.id}");
+        // 版本**恰好 +1**:服务端移动子树时会把后代的 version 各 +1(6.11:后代的完整路径变了,
+        // 而 ETag 是 version 的生成列,不 +1 的话客户端会继续用旧路径引用它)。所以"没有重传"
+        // 不能断言成"版本不变"—— 那会与契约本身矛盾;能区分的是**只有这一跳**:
+        // 若客户端还额外做了一次上传或逐个改名,版本会变成 +2。
+        Check("⑫ 子文件只跟着 MOVE 走了这一跳(版本恰好 +1,没有额外上传/改名)",
+            afterFile is not null && beforeFile is not null && afterFile.version == beforeFile.version + 1,
+            afterFile is null || beforeFile is null ? "缺条目" : $"旧={beforeFile.version} 新={afterFile.version}");
+        Check("⑫ 子文件没有走「逐个改名」的路径(整棵子树跟着目录一起 MOVE)",
+            !host.Status.Any(s => s.RelativePath.StartsWith(renameTo + "/", StringComparison.OrdinalIgnoreCase)
+                                  && s.Message.Contains("已改名(原", StringComparison.Ordinal)));
+        Check("⑫ 目录改名后本地文件仍在(数据安全)",
+            File.Exists(Path.Combine(root, renameTo, "keep.txt")));
+
+        // ④b **移动进另一个目录**(换父目录,不是纯改名):走同一个 MOVE 端点,parent 变了
+        var moveHost = $"{dirPrefix}-movehost";
+        var moveHostPath = Path.Combine(root, moveHost);
+        Directory.CreateDirectory(moveHostPath);
+        await host.ReconcileAsync();
+        var remoteMoveHost = await files.FindByNameAsync(space.id, null, moveHost);
+        Directory.Move(Path.Combine(root, renameTo), Path.Combine(moveHostPath, renameTo));
+        await host.ReconcileAsync();
+        var movedDir = remoteMoveHost is null ? null : await files.FindByNameAsync(space.id, remoteMoveHost.id, renameTo);
+        Check("⑫ 目录移动后出现在新父目录下(远端父子关系已改)", movedDir is { is_dir: true },
+            movedDir is null ? "新父目录下没有它" : "");
+        Check("⑫ 移动复用同一个远端 file id",
+            movedDir is not null && beforeRename is not null && movedDir.id == beforeRename.id,
+            movedDir is null || beforeRename is null ? "缺条目" : $"旧={beforeRename.id} 新={movedDir.id}");
+        Check("⑫ 移动后顶层已无该目录(不是复制了一份)",
+            await files.FindByNameAsync(space.id, null, renameTo) is null);
+        Check("⑫ 移动后子文件仍在(内容安全)",
+            movedDir is not null && (await files.ListAsync(space.id, movedDir.id)).Count == 1,
+            movedDir is null ? "缺条目" : "");
 
         // 失败时把每文件状态表打出来(NETDISK_E2E_VERBOSE=1):失败往往是"某个文件停在
         // Failed/待处理"造成的,而状态本身不会出现在通知里 —— 没有这张表就只能靠猜。

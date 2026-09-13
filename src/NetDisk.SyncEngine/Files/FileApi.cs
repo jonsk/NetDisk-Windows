@@ -113,7 +113,23 @@ public sealed class FileApi
             ct);
 
     /// <summary>
-    /// 列出子树并算出**相对路径**(首次运行向导的容量预估要用它)。
+    /// 移动条目到新父目录(可同时改名),契约 <c>POST /api/v1/files/{id}/move</c>。
+    ///
+    /// 与 <see cref="RenameAsync"/> 的分工:纯改名走 PATCH(同步 200),**换父目录**只能走 move。
+    /// 目录改名/移动传播必须用它 —— 目录没有"内容"可传,只有"位置"要改;逐文件重传是错的。
+    ///
+    /// ⚠ **超阈值时服务端返回 202**(转异步任务,条目仍在原处):调用方必须检查
+    /// <c>res.async</c>,不要在 202 时就按"已移动"更新本地状态 —— 任务可能失败。
+    /// </summary>
+    public Task<MoveResult> MoveAsync(
+        string fileId, string? newParentId, string newName,
+        long baseVersion = 0, CancellationToken ct = default) =>
+        _api.PostAsync<MoveResult>(
+            $"/api/v1/files/{Uri.EscapeDataString(fileId)}/move",
+            new { parent_id = newParentId, name = newName, base_version = baseVersion },
+            ct);
+
+    /// <summary>列出子树并算出**相对路径**(首次运行向导的容量预估要用它)。
     ///
     /// 为什么要单独一个方法:列表接口只给 parent_id,**不给路径**;而"这次要同步多少
     /// 数据、有多少个文件"必须按相对路径来算(也是后面逐级建目录的依据)。
