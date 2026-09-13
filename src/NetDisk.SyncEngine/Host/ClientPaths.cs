@@ -36,7 +36,8 @@ public static class ClientPaths
                     return _dataDir;
                 }
 
-                var exeDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+                var exeDir = (ExeDirectoryOverride ?? AppContext.BaseDirectory)
+                    .TrimEnd(Path.DirectorySeparatorChar);
                 if (!string.IsNullOrEmpty(exeDir) && IsWritable(exeDir))
                 {
                     _dataDir = exeDir;
@@ -55,8 +56,22 @@ public static class ClientPaths
     }
 
     /// <summary>旧的 %APPDATA% 位置(迁移来源;也为"回退"复用）。</summary>
-    public static string LegacyDirectory => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NetDisk");
+    public static string LegacyDirectory =>
+        LegacyDirectoryOverride
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NetDisk");
+
+    /// <summary>
+    /// **测试注入**:覆盖"程序所在目录"(默认 <see cref="AppContext.BaseDirectory"/>)。
+    ///
+    /// 为什么需要它:回退与一次性迁移这两个分支只在特定环境里才走到 ——
+    /// "装到 Program Files 导致不可写"和"用户从旧版本升级上来、旧位置还有数据"都不是随手能造的现场。
+    /// 不给缝的话,① 的核心逻辑就只能靠**间接**证据(MSI 装完看文件落在哪),那证明不了回退与迁移。
+    /// 与项目里既有的注入点同一做法(如 <c>ApiClientOptions.DelayAsync</c>)。
+    /// </summary>
+    public static string? ExeDirectoryOverride { get; set; }
+
+    /// <summary>**测试注入**:覆盖旧的 %APPDATA%\NetDisk(迁移来源/回退落点)。</summary>
+    public static string? LegacyDirectoryOverride { get; set; }
 
     public static string ConfigPath => Path.Combine(DataDirectory, "client.json");
 
