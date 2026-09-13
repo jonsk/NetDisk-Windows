@@ -174,7 +174,7 @@ public partial class SyncView : System.Windows.Controls.UserControl
         var downloading = status.Count(s => s.State == SyncState.PendingDownload);
         var conflicts = status.Count(s => s.State == SyncState.Conflict);
         var errors = status.Count(s => s.State is SyncState.SpaceRevoked
-            or SyncState.PermissionLimited or SyncState.PendingRemoteGone);
+            or SyncState.PermissionLimited or SyncState.PendingRemoteGone or SyncState.Failed);
 
         SummaryText.Text = status.Count == 0
             ? "尚无文件(同步目录为空,或还没完成第一次对账)"
@@ -191,6 +191,7 @@ public partial class SyncView : System.Windows.Controls.UserControl
         SyncState.PendingRemoteGone => "远端已删除",
         SyncState.SpaceRevoked => "空间已移除",
         SyncState.PermissionLimited => "权限受限",
+        SyncState.Failed => "失败",
         _ => state.ToString(),
     };
 

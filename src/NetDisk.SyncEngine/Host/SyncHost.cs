@@ -126,6 +126,7 @@ public sealed class SyncHost : IAsyncDisposable
         QueueOptions = BuildQueueOptions(_config);
         _queue = new TransferQueue(QueueOptions, _clock);
         _queue.Progress += OnQueueProgress; // 界面上的"传到多少了"来自这里
+        _queue.Failed += OnQueueFailed;     // 失败必须有痕迹:状态 + 日志(见 OnQueueFailed)
         if (watchLocal && !string.IsNullOrWhiteSpace(_config.SyncRoot))
         {
             _watcher = new FileWatcher(new FileSystemWatcherBackend(_config.SyncRoot), _clock);
@@ -357,6 +358,9 @@ public sealed class SyncHost : IAsyncDisposable
         }
         Notice?.Invoke("对账:开始列远端…");
         var remote = new Dictionary<string, EntryView>(StringComparer.OrdinalIgnoreCase);
+        // 远端**目录**集合(相对路径)。目录也要参与同步:用户删掉一个文件夹时,
+        // 服务端删"目录"就是删整棵子树(一次调用),比逐个文件删少 N 次请求。
+        var remoteDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var parentOf = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
         await foreach (var e in _files.WalkAsync(spaceId, string.IsNullOrEmpty(_config.ParentId) ? null : _config.ParentId, ct))
@@ -368,7 +372,30 @@ public sealed class SyncHost : IAsyncDisposable
             }
             if (e.is_dir)
             {
-                Directory.CreateDirectory(LongPath.ToExtended(LocalOf(rel)));
+                // 远端目录 → 本地:只有"我们没见过它"或"远端这个目录换了身份"时才落地。
+                //
+                // 关键区别(实测定下来的):状态行 `dir:<rel>` 就是"这个本地路径**曾经**
+                // 与哪个远端目录对应"的凭据。
+                //   · 没有状态行 → 远端多出来的新目录(另一端建的、或首次同步)→ 落地 ✓
+                //   · 有状态行、id 也没变,但本地目录不在了 → **是用户把它删了**,
+                //     绝不能在这里 CreateDirectory 把它当场复活 —— 复活之后本轮扫描
+                //     自然"看得见"这个目录,删除传播永远等不到"本地已无",用户删掉的
+                //     文件夹就永远传不到远端(真机 ⑫ 实测:远端目录一直留着)。
+                //   · 有状态行但 id 变了(远端删了又建同名 = **新目录**)→ 当新目录落地,
+                //     与文件侧"复活的一律当新文件"一致;否则会把别人新建的目录当旧目录删掉。
+                var knownDirId = KnownFileId("dir:" + rel);
+                if (!string.Equals(knownDirId, e.id, StringComparison.Ordinal))
+                {
+                    Directory.CreateDirectory(LongPath.ToExtended(LocalOf(rel)));
+                    if (knownDirId is not null)
+                    {
+                        // 旧身份的行必须先删:`sync_state` 主键是 file_id、local_path 上没有唯一约束,
+                        // 两行同路径时 `KnownFileId` 查出哪一条是不确定的。
+                        RemoveStateRow("dir:" + rel);
+                    }
+                    SaveDirState(rel, e.id);
+                }
+                remoteDirs.Add(rel);
                 continue;
             }
             remote[rel] = e;
@@ -389,6 +416,20 @@ public sealed class SyncHost : IAsyncDisposable
         // 远端是对的(旧名已消失),本地却多出一个旧名字,下一轮又会被当成新文件传上去。
         var renames = DetectLocalRenames();
 
+        // 本地扫描**只做一次**:目录与文件两处都要用(两次扫描不只浪费,
+        // 还可能出现"两次结果不一致"这种自找的麻烦)。
+        var scan = TakeLocalScan();
+
+        // **目录的新建与删除传播**(2026-09-13)。
+        // 放在文件删除之前:本地删掉一个目录时,服务端删**目录**就是删整棵子树(一次调用),
+        // 比"逐个文件删"少 N 次请求,也不会在中间态留下空目录。
+        var dirOps = await SyncDirectoriesAsync(spaceId, remote, remoteDirs, renames, scan, ct)
+            .ConfigureAwait(false);
+        if (dirOps > 0)
+        {
+            Notice?.Invoke($"目录同步:本轮处理 {dirOps} 个目录(新建/删除)");
+        }
+
         // **删除传播(双向,无用户确认)**
         //
         // 产品决策(2026-09-13,用户拍板"删除要双向传播"+"一致优先、无条件",二次确认由我定):
@@ -399,7 +440,7 @@ public sealed class SyncHost : IAsyncDisposable
         // 且 `MaxEntries` 超限是**静默截断** —— 这两条会让"看不见"伪装成"已删除"。
         // 若照此传播,一次权限抖动或一次 ACL 变更就会把远端文件删光(服务端是**硬删、无回收站**)。
         // 同理远端侧:列举失败会抛异常(不静默返回短列表),所以"列完了"这件事本身可信。
-        var deletions = await PropagateDeletionsAsync(spaceId, remote, renames, ct).ConfigureAwait(false);
+        var deletions = await PropagateDeletionsAsync(spaceId, remote, renames, scan, ct).ConfigureAwait(false);
         if (deletions > 0)
         {
             Notice?.Invoke($"删除传播:本轮两端共删除 {deletions} 个文件");
@@ -798,6 +839,24 @@ public sealed class SyncHost : IAsyncDisposable
             "", KnownVersion(rel), percent);
     }
 
+    /// <summary>
+    /// 传输任务**失败**时的收尾。
+    ///
+    /// 为什么必须有这个处理器(真机踩到的):队列的失败只发 `Failed` 事件、只写它自己的
+    /// 完成表,而界面与日志看的是**状态列表与通知**。没人订阅的后果是:
+    /// 文件停在「待上传」、日志里一个字都没有、下一轮对账再失败一次 ——
+    /// 用户看到的是"网盘不动了",我们拿到的证据是"什么都没有"。实测 SyncHostCheck ⑫
+    /// 就是这样:两个文件永远停在 PendingUpload,而日志里连一条失败都没有。
+    /// </summary>
+    private void OnQueueFailed(TransferJob job, Exception ex)
+    {
+        var rel = _jobRel.TryGetValue(job.Id, out var r) ? r : job.DisplayName;
+        _jobRel.TryRemove(job.Id, out _);
+        var state = SyncState.Failed;
+        Upsert(rel, state, $"传输失败:{ex.Message}", KnownVersion(rel));
+        Notice?.Invoke($"{(job.Direction == TransferDirection.Upload ? "上传" : "下载")}失败 {rel}:{ex.Message}(下一轮对账会重试)");
+    }
+
     public async ValueTask DisposeAsync()
     {
         _running = false;
@@ -826,6 +885,7 @@ public sealed class SyncHost : IAsyncDisposable
             }
         }
         _queue.Progress -= OnQueueProgress;
+        _queue.Failed -= OnQueueFailed;
         await _queue.DisposeAsync().ConfigureAwait(false);
         _store.Dispose();
     }
@@ -1014,6 +1074,213 @@ public sealed class SyncHost : IAsyncDisposable
 
     // ---------------------------------------------------------------- 删除传播
 
+    /// <summary>本地扫描的一次快照(目录与文件都用它,避免两次扫描结果不一致)。</summary>
+    private sealed record LocalScan(HashSet<string> Files, HashSet<string> Dirs, int RawCount, bool Truncated);
+
+    /// <summary>
+    /// 扫一次本地树。**截断要如实告诉调用方**:`DirectoryScanner.MaxEntries` 超限时是**静默 break**,
+    /// 而"看不见"与"被删了"在扫描结果上一模一样 —— 所以截断时必须放弃一切删除推断。
+    /// </summary>
+    private LocalScan TakeLocalScan()
+    {
+        var scanner = new DirectoryScanner();
+        var raw = scanner.Scan(_config.SyncRoot, recursive: true);
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in raw)
+        {
+            var rel = Path.GetRelativePath(_config.SyncRoot, e.Path).Replace('\\', '/');
+            if (e.IsDirectory)
+            {
+                dirs.Add(rel);
+                continue;
+            }
+            if (rel.EndsWith(".part", StringComparison.OrdinalIgnoreCase))
+            {
+                continue; // 半成品不参与同步(下载中)
+            }
+            files.Add(rel);
+        }
+        return new LocalScan(files, dirs, raw.Count, raw.Count >= scanner.MaxEntries);
+    }
+
+    /// <summary>记下目录的远端 id(<c>dir:&lt;rel&gt;</c> 作为状态库里的"路径")。</summary>
+    private void SaveDirState(string rel, string dirId) =>
+        _store.Execute(
+            """
+            INSERT INTO sync_state(file_id, space_id, local_path, remote_version, local_mtime_ticks, size, hash_sha256, state, updated_at_utc, local_identity)
+            VALUES ($id, $space, $p, 0, 0, 0, '', 'InSync', $now, '')
+            ON CONFLICT(file_id) DO UPDATE SET local_path=$p, updated_at_utc=$now
+            """,
+            ("id", dirId), ("space", _config.SpaceId), ("p", "dir:" + rel),
+            ("now", _clock.GetUtcNow().ToString("O")));
+
+    /// <summary>
+    /// **目录的新建与删除传播**(2026-09-13)。
+    ///
+    /// 三件事:
+    ///   ① 本地新目录 → 远端建目录(空目录也要能同步;否则用户建的文件夹在另一端"不存在",
+    ///      而一旦往里放文件又会因为父目录不存在而出错);
+    ///   ② 本地目录已无 → 远端删该目录(**一次调用删整棵子树**)+ 清掉它下面所有状态行;
+    ///   ③ 远端目录已无 → 本地删该目录(连同子目录)。
+    ///
+    /// 与文件删除同一套**信号完整性**护栏(扫描截断/同步根不可达/根身份变化则整轮不做),
+    /// 另加一条针对"目录改名"的保护:若这个目录下面有文件是**本地改名带走的**
+    /// (即 `renames.OldPaths` 落在它下面),则**不删** —— 目录改名目前不支持,
+    /// 若在这里当成删除,用户改个文件夹名就会把远端一整个子树的文件删掉(硬删、无回收站)。
+    /// </summary>
+    private async Task<int> SyncDirectoriesAsync(
+        string spaceId,
+        Dictionary<string, EntryView> remote,
+        HashSet<string> remoteDirs,
+        (Dictionary<string, string> NewToOld, HashSet<string> OldPaths) renames,
+        LocalScan scan,
+        CancellationToken ct)
+    {
+        if (!Directory.Exists(LongPath.ToExtended(_config.SyncRoot)))
+        {
+            return 0;
+        }
+        if (scan.Truncated)
+        {
+            Notice?.Invoke("目录同步:本轮跳过 —— 本机文件数达到扫描上限,扫描被**截断**");
+            return 0;
+        }
+        if (!RootIdentityUnchanged())
+        {
+            return 0;
+        }
+
+        var ops = 0;
+
+        // **先固定"本轮开始时已知的目录行"**,之后再进入新建阶段。
+        //
+        // 为什么必须在这一步取快照(而不是边循环边读):①新建目录会**立刻**写状态行
+        // (`SaveDirState`),而 `remoteDirs` 是本轮对账开头那份远端清单 —— 新建的目录
+        // 当然不在里面。于是同一个函数的后半段(③"远端已无 → 本地删目录")会把**刚刚
+        // 建好的目录**当成"远端已经没有了",把本地目录连文件一起删掉。
+        //
+        // 真机实测(2026-09-13,SyncHostCheck ⑫):本地建 `-withfiles/{a.txt,b.txt}` →
+        // 远端目录建好了(✓),但**本地那个目录连同两个文件被删了**,文件自然一个都没传上去
+        // (下一个断言"目录里的两个文件都上传了 [远端子项=0]"),随后 `Directory.Delete`
+        // 直接抛 DirectoryNotFoundException —— 这是**本地数据丢失**,不是显示问题。
+        //
+        // `EnsureParentDirAsync` 顺带建出的**中间目录**(例如 `p/q/r` 里的 `p`、`p/q`)
+        // 同样会写状态行,所以"把①里显式建的目录加进 remoteDirs"这种改法**不够**:
+        // 判定的输入必须是**本轮开始前**就已经存在的行(快照取在这里,不是"边循环边读")。
+        var knownDirRows = KnownRows()
+            .Where(r => r.LocalPath.StartsWith("dir:", StringComparison.Ordinal))
+            .ToList();
+
+        // ① 本地新目录 → 远端建目录(只处理状态库里没有记录的目录)
+        foreach (var rel in scan.Dirs)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (remoteDirs.Contains(rel) || KnownFileId("dir:" + rel) is not null)
+            {
+                continue;
+            }
+            if (renames.NewToOld.Values.Any(old => old.StartsWith(rel + "/", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue; // 这是"改名后的新目录",别把它当新目录重复建
+            }
+            try
+            {
+                var parentId = await EnsureParentDirAsync(rel, ct).ConfigureAwait(false);
+                var created = await _files.CreateDirectoryAsync(
+                    spaceId, parentId, Path.GetFileName(rel), ct).ConfigureAwait(false);
+                SaveDirState(rel, created.id);
+                ops++;
+                Notice?.Invoke($"目录同步:已创建远端目录 {rel}");
+            }
+            catch (Exception ex)
+            {
+                Notice?.Invoke($"创建远端目录失败 {rel}:{ex.Message}(下一轮再试)");
+            }
+        }
+
+        // ②③ 删除:只遍历**本轮开始前**已知的目录行(本轮新建的不参与本轮删除判定)
+        foreach (var (dirId, dirPath, _) in knownDirRows)
+        {
+            ct.ThrowIfCancellationRequested();
+            var rel = dirPath["dir:".Length..];
+
+            // ② 本地已无 → 远端删子树
+            if (!scan.Dirs.Contains(rel))
+            {
+                if (renames.OldPaths.Any(old => old.StartsWith(rel + "/", StringComparison.OrdinalIgnoreCase)))
+                {
+                    Notice?.Invoke($"目录同步:{rel} 下面是**本地改名**带走的文件 —— 目录改名暂不支持,本轮不删(避免误删整棵子树)");
+                    continue;
+                }
+                if (!ParentEnumerable(Path.Combine(_config.SyncRoot, rel)))
+                {
+                    continue; // 父目录读不到:可能是权限/网络问题,不是删除
+                }
+                try
+                {
+                    await _files.DeleteAsync(dirId, ct).ConfigureAwait(false);
+                    RemoveStateRowsUnder(rel);
+                    // **快照也要跟着更新**:这一步删掉的是**整棵子树**,而 `remote` 是本轮
+                    // 开头列的清单,里面还留着子树里的每个文件。不删干净的话,随后的下载阶段
+                    // 会给它们各发一次注定 404 的请求(真机日志里就是三条
+                    // 「下载失败 …:文件不存在」),把整个界面刷成失败态 —— 而我们**刚刚**
+                    // 亲手删掉了它们,这根本不是"远端删了要同步到本地"。
+                    foreach (var gone in remote.Keys
+                                 .Where(k => k.StartsWith(rel + "/", StringComparison.OrdinalIgnoreCase))
+                                 .ToList())
+                    {
+                        remote.Remove(gone);
+                        RemoveStateRow(gone);
+                        RemoveStatus(gone);
+                    }
+                    Notice?.Invoke($"目录同步:本地已删除 {rel},远端子树已同步删除");
+                    ops++;
+                }
+                catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+                {
+                    RemoveStateRowsUnder(rel); // 远端已经没有了
+                }
+                catch (Exception ex)
+                {
+                    Notice?.Invoke($"删除远端目录失败 {rel}:{ex.Message}(下一轮再试)");
+                }
+                continue;
+            }
+
+            // ③ 远端已无 → 本地删目录(连同子目录)
+            if (!remoteDirs.Contains(rel))
+            {
+                var local = LongPath.ToExtended(LocalOf(rel));
+                try
+                {
+                    if (Directory.Exists(local))
+                    {
+                        Directory.Delete(local, recursive: true);
+                    }
+                    RemoveStateRowsUnder(rel);
+                    Notice?.Invoke($"目录同步:远端已删除 {rel},本地目录已同步删除");
+                    ops++;
+                }
+                catch (Exception ex)
+                {
+                    Notice?.Invoke($"删除本地目录失败 {rel}:{ex.Message}(下一轮再试)");
+                }
+            }
+        }
+
+
+        return ops;
+    }
+
+    /// <summary>删掉某个目录下的所有状态行(含它自己:`dir:&lt;rel&gt;` 与 <c>rel/...</c>)。</summary>
+    private void RemoveStateRowsUnder(string rel)
+    {
+        _store.Execute("DELETE FROM sync_state WHERE local_path=$d", ("d", "dir:" + rel));
+        _store.Execute("DELETE FROM sync_state WHERE local_path=$p OR local_path LIKE $prefix",
+            ("p", rel), ("prefix", rel + "/%"));
+    }
+
     /// <summary>
     /// **双向删除传播**(2026-09-13 产品决策:删除要双向传播、一致优先、**两端都不弹确认**)。
     ///
@@ -1032,8 +1299,10 @@ public sealed class SyncHost : IAsyncDisposable
         string spaceId,
         Dictionary<string, EntryView> remote,
         (Dictionary<string, string> NewToOld, HashSet<string> OldPaths) renames,
+        LocalScan scan,
         CancellationToken ct)
     {
+        _ = spaceId;
         // ---- 信号完整性(本地)----
         if (!Directory.Exists(LongPath.ToExtended(_config.SyncRoot)))
         {
@@ -1049,32 +1318,19 @@ public sealed class SyncHost : IAsyncDisposable
         {
             return 0;
         }
-        var scanner = new DirectoryScanner();
-        var raw = scanner.Scan(_config.SyncRoot, recursive: true);
-        if (raw.Count >= scanner.MaxEntries)
+        if (scan.Truncated)
         {
-            Notice?.Invoke($"删除传播:本轮跳过 —— 本机文件数达到扫描上限 {scanner.MaxEntries},扫描被**截断**,不能据此认定删除");
+            Notice?.Invoke("删除传播:本轮跳过 —— 本机文件数达到扫描上限,扫描被**截断**,不能据此认定删除");
             return 0;
         }
-        var localFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var e in raw)
-        {
-            if (e.IsDirectory)
-            {
-                continue;
-            }
-            var rel = Path.GetRelativePath(_config.SyncRoot, e.Path).Replace('\\', '/');
-            if (rel.EndsWith(".part", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-            localFiles.Add(rel);
-        }
+        var localFiles = scan.Files;
 
         var deleted = 0;
 
         // ---- ① 远端已无 → 删本地 ----
-        foreach (var (fileId, rel, _) in KnownRows())
+        // 只看**文件**行:目录行以 `dir:` 开头,由 SyncDirectoriesAsync 处理(它按整棵子树删,更高效)。
+        foreach (var (fileId, rel, _) in KnownRows()
+                     .Where(r => !r.LocalPath.StartsWith("dir:", StringComparison.Ordinal)))
         {
             ct.ThrowIfCancellationRequested();
             _ = fileId;
@@ -1121,6 +1377,12 @@ public sealed class SyncHost : IAsyncDisposable
         foreach (var (fileId, rel, knownVersion) in rows)
         {
             ct.ThrowIfCancellationRequested();
+            // **目录行交给 SyncDirectoriesAsync**:它们以 `dir:` 开头(路径前缀会让这里的
+            // ParentEnumerable 与文件判断全部走错),而且按整棵子树删更高效。
+            if (rel.StartsWith("dir:", StringComparison.Ordinal))
+            {
+                continue;
+            }
             if (localFiles.Contains(rel) || renames.NewToOld.ContainsKey(rel) || renames.OldPaths.Contains(rel))
             {
                 continue;
@@ -1177,19 +1439,13 @@ public sealed class SyncHost : IAsyncDisposable
     }
 
     /// <summary>本空间的同步状态行(file_id + 本地相对路径 + 已知远端版本)。</summary>
-    private List<(string FileId, string LocalPath, long RemoteVersion)> KnownRows()
-    {
-        var list = new List<(string, string, long)>();
-        using var cmd = _store.Connection.CreateCommand();
-        cmd.CommandText = "SELECT file_id, local_path, remote_version FROM sync_state WHERE space_id=$s";
-        cmd.Parameters.AddWithValue("$s", _config.SpaceId);
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            list.Add((reader.GetString(0), reader.GetString(1), reader.GetInt64(2)));
-        }
-        return list;
-    }
+    private List<(string FileId, string LocalPath, long RemoteVersion)> KnownRows() =>
+        // 走 StateStore 的封装(与传输 worker 共用同一把锁):直接自建命令会在
+        // "worker 正在写状态"时与它并发用同一条 SQLite 连接(见 StateStore._gate)
+        _store.Query(
+            "SELECT file_id, local_path, remote_version FROM sync_state WHERE space_id=$s",
+            reader => (reader.GetString(0), reader.GetString(1), reader.GetInt64(2)),
+            ("$s", _config.SpaceId));
 
     /// <summary>sync_meta 里记"这个状态库属于哪个同步根"。</summary>
     private const string RootIdentityKey = "root_identity";

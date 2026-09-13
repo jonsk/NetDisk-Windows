@@ -167,34 +167,40 @@ public sealed class FileApi
         _api.GetAsync<SpaceList>("/api/v1/spaces", ct);
 
     /// <summary>
-    /// 建目录。**走 WebDAV MKCOL**,而不是某个 JSON 端点:
-    /// 服务端没有"建目录"的 REST 接口(`/api/v1/files` 只有 GET,目录创建属于
-    /// WebDAV 能力集),契约里也是如此。用错入口会 404/405,而不是"看起来也行"。
+    /// 建目录(契约 <c>POST /api/v1/files/dirs</c>)。
+    ///
+    /// **不能再走 WebDAV MKCOL**:MKCOL 要 Basic 账密(ADR-6),而客户端按设计只
+    /// 持有 Bearer 令牌 —— 真机实测这条路的报错是
+    /// <c>WebDAV 认证失败: 请提供 Basic 凭据</c>。后果不是"少一个功能",而是
+    /// **任何要放进子目录的文件都传不上去**(所有同步用例此前只在同步根放文件,
+    /// 所以一直没暴露)。服务端为此补了令牌可用的 REST 入口。
+    ///
+    /// 服务端是**严格新建**:同名占用回 409 <c>name_conflict</c>(不返回已有条目)。
+    /// 同步循环里"这个名字在远端已经存在"是常态(另一端刚建过、或上一次没把 id
+    /// 记进 state),所以这里把 409 处理成"已存在":再列一次父目录按名字取回它。
+    /// 但同名的是**文件**时如实抛错 —— 那种情况必须让用户看见,不能悄悄换名建目录。
     /// </summary>
     public async Task<EntryView> CreateDirectoryAsync(
         string spaceId, string? parentId, string name, CancellationToken ct = default)
     {
-        // WebDAV 路径按 <space_id>/<相对路径> 组织;MVP 只用到"某一层之下"这一种形态,
-        // 所以由调用方保证 name 不含分隔符(带分隔符的层级创建由 EnsureParentDir 逐级做)
-        var prefix = string.IsNullOrEmpty(parentId) ? "" : $"{parentId}/";
-        var path = $"/webdav/{Uri.EscapeDataString(spaceId)}/{prefix}{Uri.EscapeDataString(name)}";
-        using var resp = await _api.WebDavAsync("MKCOL", path, null, null, ct).ConfigureAwait(false);
-        // MKCOL 成功是 201 Created(201 而非 200/204);已存在是 405,这里当成"已存在"处理
-        var id = resp.Headers.TryGetValues("X-File-Id", out var vals) ? vals.FirstOrDefault() : null;
-        if (!string.IsNullOrEmpty(id))
+        try
         {
-            return await GetEntryAsync(id!, ct).ConfigureAwait(false);
+            return await _api.PostAsync<EntryView>(
+                "/api/v1/files/dirs",
+                new { space_id = spaceId, parent_id = parentId, name },
+                ct).ConfigureAwait(false);
         }
-        // 服务端未回 X-File-Id 时,回落到按名字查父目录列表
-        foreach (var e in await ListAsync(spaceId, parentId, ct).ConfigureAwait(false))
+        catch (ApiException ex) when (ex.Status == HttpStatusCode.Conflict)
         {
-            if (e.is_dir && string.Equals(e.name, name, StringComparison.OrdinalIgnoreCase))
+            var existing = await FindByNameAsync(spaceId, parentId, name, ct).ConfigureAwait(false);
+            if (existing is { is_dir: true })
             {
-                return e;
+                return existing;
             }
+            // 取不到(竞态:同名条目刚被删)或同名的是文件 → 把 409 原样抛出:
+            // 上层据此记一条明确的失败,而不是"看起来建好了"
+            throw;
         }
-        throw new ApiException(resp.StatusCode, "mkdir_no_id",
-            $"建目录成功但没有拿到目录 id: {path}");
     }
 
     /// <summary>按名字在指定父目录下找一个条目(MVP:目录去重靠它)。</summary>

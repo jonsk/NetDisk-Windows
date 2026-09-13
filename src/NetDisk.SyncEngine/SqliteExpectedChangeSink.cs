@@ -48,22 +48,18 @@ VALUES ($path, $op, '', $at, $size, $mtime)",
 
     public IReadOnlyList<ExpectedChange> Load()
     {
-        var list = new List<ExpectedChange>();
-        using var cmd = _store.Connection.CreateCommand();
-        // 显式列名(纪律①)—— 不用 SELECT *
-        cmd.CommandText =
-            "SELECT local_path, expected_size, expected_mtime_ticks, created_at_utc FROM expected_changes";
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            var path = reader.GetString(0);
-            var size = reader.GetInt64(1);
-            var mtime = reader.GetInt64(2);
-            var at = DateTimeOffset.TryParse(reader.GetString(3), out var parsed)
-                ? parsed
-                : DateTimeOffset.UnixEpoch;
-            list.Add(new ExpectedChange(path, size, mtime, at));
-        }
-        return list;
+        // 走 StateStore 的封装(显式列名 + 与别的线程共用同一把锁,见 StateStore._gate)
+        return _store.Query(
+            "SELECT local_path, expected_size, expected_mtime_ticks, created_at_utc FROM expected_changes",
+            reader =>
+            {
+                var path = reader.GetString(0);
+                var size = reader.GetInt64(1);
+                var mtime = reader.GetInt64(2);
+                var at = DateTimeOffset.TryParse(reader.GetString(3), out var parsed)
+                    ? parsed
+                    : DateTimeOffset.UnixEpoch;
+                return new ExpectedChange(path, size, mtime, at);
+            });
     }
 }

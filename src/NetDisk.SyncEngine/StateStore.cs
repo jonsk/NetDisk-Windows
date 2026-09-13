@@ -246,28 +246,91 @@ PRAGMA busy_timeout = 5000;";
 
     // ---- 薄封装(后续条目用;刻意都要求显式列名,见纪律②)----
 
+    // 状态库的**连接对象不是线程安全的**,而它同时被对账线程与多个传输 worker 使用
+    // (worker 上传/下载完成后会写 `SaveState`)。实测到的两个后果:
+    //   ① **关闭竞态**:`Dispose` 与 worker 的写并发时 `SqliteConnection.Close()`
+    //      内部抛 NullReferenceException,把整个进程以**未处理异常**打掉
+    //      (真机 SyncHostCheck 第 7 次运行就是这样崩的:"Unhandled exception …
+    //      at Microsoft.Data.Sqlite.SqliteConnection.Close()");
+    //   ② 同一条连接上并发执行命令本身就是未定义行为(WAL 只解决**多连接**并发,
+    //      不解决"一个连接被多线程用")。
+    // 命令都是本地小查询,加一把锁的代价可以忽略,换掉的是"偶发崩溃 + 状态写丢"。
+    private readonly object _gate = new();
+    private bool _disposed;
+
     public void Execute(string sql, params (string Name, object? Value)[] args)
     {
-        using var cmd = Connection.CreateCommand();
-        cmd.CommandText = sql;
-        foreach (var (n, v) in args)
+        lock (_gate)
         {
-            cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
+            using var cmd = Connection.CreateCommand();
+            cmd.CommandText = sql;
+            foreach (var (n, v) in args)
+            {
+                cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
+            }
+            cmd.ExecuteNonQuery();
         }
-        cmd.ExecuteNonQuery();
     }
 
     public object? Scalar(string sql, params (string Name, object? Value)[] args)
     {
-        using var cmd = Connection.CreateCommand();
-        cmd.CommandText = sql;
-        foreach (var (n, v) in args)
+        lock (_gate)
         {
-            cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
+            using var cmd = Connection.CreateCommand();
+            cmd.CommandText = sql;
+            foreach (var (n, v) in args)
+            {
+                cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
+            }
+            var result = cmd.ExecuteScalar();
+            return result is DBNull ? null : result;
         }
-        var result = cmd.ExecuteScalar();
-        return result is DBNull ? null : result;
     }
 
-    public void Dispose() => Connection.Dispose();
+    /// <summary>
+    /// 读多行(显式列名)。与 <see cref="Execute"/>/<see cref="Scalar"/> 共用同一把锁:
+    /// 直接用 <c>store.Connection</c> 自建命令会绕过锁,等于把上面 ①② 两个坑又打开。
+    /// </summary>
+    public List<T> Query<T>(string sql, Func<SqliteDataReader, T> map,
+        params (string Name, object? Value)[] args)
+    {
+        lock (_gate)
+        {
+            using var cmd = Connection.CreateCommand();
+            cmd.CommandText = sql;
+            foreach (var (n, v) in args)
+            {
+                cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
+            }
+            using var reader = cmd.ExecuteReader();
+            var rows = new List<T>();
+            while (reader.Read())
+            {
+                rows.Add(map(reader));
+            }
+            return rows;
+        }
+    }
+
+    /// <summary>关闭状态库。**幂等**:重复调用是空操作(调用方可能既有 using 又有显式 Dispose)。</summary>
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            try
+            {
+                Connection.Dispose();
+            }
+            catch (Exception)
+            {
+                // 关库失败不改变任何结论:SQLite 的写入在语句提交时已经落盘,
+                // 这里再抛只会让"退出"这条路径把进程打崩(见上面 ①)。
+            }
+        }
+    }
 }

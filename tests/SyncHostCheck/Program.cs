@@ -23,6 +23,7 @@ using NetDisk.SyncEngine;
 using NetDisk.SyncEngine.Files;
 using NetDisk.SyncEngine.Host;
 using NetDisk.SyncEngine.Onboarding;
+using NetDisk.SyncEngine.Watch;
 using NetDisk.Transport;
 
 var baseUrl = Environment.GetEnvironmentVariable("NETDISK_E2E_BASE") ?? "http://127.0.0.1:8080";
@@ -636,6 +637,182 @@ try
         Check("⑪ 换到新同步目录后仍能正常同步(新目录里的文件已上传)",
             await files.FindByNameAsync(space.id, null, restartName) is not null);
         await fresh.DisposeAsync();
+    }
+
+    // ------------------------------------------------ ⑫ 目录级:新建 / 删除 / 改名保护
+    // 目录也要参与同步(2026-09-13):用户建的空文件夹要在另一端出现,删掉的文件夹要**整棵子树**同步删。
+    // 三条断言都对着"用户会做的事",另加一条**数据安全**断言(目录改名暂不支持,但绝不能误删远端子树)。
+    Console.WriteLine();
+    Console.WriteLine("— ⑫ 目录级:新建 / 删除 / 改名保护");
+    {
+        var dirPrefix = $"sync-check-{DateTime.Now:HHmmss}";
+        await using var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false);
+        if (Environment.GetEnvironmentVariable("NETDISK_E2E_VERBOSE") == "1")
+        {
+            host.Notice += m => Console.WriteLine($"     · {m}");
+        }
+        // 失败诊断:把"本地扫描 / 远端树 / 每文件状态"三份对照打出来。
+        // 目录同步的失败往往表现为"某个文件没上传",而这三份数据分别回答
+        // "扫描看得到吗 / 它现在在哪 / 传输层怎么记的" —— 缺任何一份都只能靠猜。
+        async Task DiagAsync(string label)
+        {
+            if (Environment.GetEnvironmentVariable("NETDISK_E2E_VERBOSE") != "1")
+            {
+                return;
+            }
+            Console.WriteLine($"     [诊断:{label}] 本地扫描(相对同步根):");
+            foreach (var e in new DirectoryScanner().Scan(root, recursive: true))
+            {
+                Console.WriteLine($"       {(e.IsDirectory ? "[D]" : "[F]")} {Path.GetRelativePath(root, e.Path)}");
+            }
+            Console.WriteLine($"     [诊断:{label}] 远端树(含 id / parent_id):");
+            async Task WalkAsync(EntryView? parent, string indent)
+            {
+                foreach (var k in await files.ListAsync(space.id, parent?.id))
+                {
+                    Console.WriteLine($"       {indent}{k.name}{(k.is_dir ? "/" : "")} id={k.id[..8]} parent={k.parent_id?[..8]} v={k.version}");
+                    if (k.is_dir)
+                    {
+                        await WalkAsync(k, indent + "  ");
+                    }
+                }
+            }
+            await WalkAsync(null, "");
+            Console.WriteLine($"     [诊断:{label}] 状态表:");
+            foreach (var s in host.Status)
+            {
+                Console.WriteLine($"       {s.RelativePath} → {s.State} | {s.Message} | v={s.Version}");
+            }
+        }
+        await host.StartAsync();
+        await host.ReconcileAsync();
+
+        // ① 空目录也要同步(否则用户建的文件夹在另一端"不存在")
+        var emptyDirName = $"{dirPrefix}-empty";
+        Directory.CreateDirectory(Path.Combine(root, emptyDirName));
+        await host.ReconcileAsync();
+        var remoteEmpty = await files.FindByNameAsync(space.id, null, emptyDirName);
+        Check("⑫ 本地新建的空目录已在远端创建", remoteEmpty is not null && remoteEmpty.is_dir,
+            remoteEmpty is null ? "远端没有该目录" : $"is_dir={remoteEmpty.is_dir}");
+        // **数据安全断言**(真机抓到过缺陷:本轮新建的远端目录又被本轮的"远端已无"判定
+        // 当成删除,把本地目录连文件一起删了 —— 只查远端的话这个缺陷**看起来完全正常**)。
+        Check("⑫ 建目录不会反过来删掉本地目录(数据安全)",
+            Directory.Exists(Path.Combine(root, emptyDirName)),
+            "本地目录不见了 = 本轮把刚建的目录当成远端缺失删掉了");
+
+        // ② 带文件的目录:本地建 + 删 → 远端**整棵子树**同步删
+        var dirName = $"{dirPrefix}-withfiles";
+        var dirPath = Path.Combine(root, dirName);
+        Directory.CreateDirectory(dirPath);
+        await File.WriteAllTextAsync(Path.Combine(dirPath, "a.txt"), "a");
+        await File.WriteAllTextAsync(Path.Combine(dirPath, "b.txt"), "b");
+        await host.ReconcileAsync();
+        var remoteDir = await files.FindByNameAsync(space.id, null, dirName);
+        Check("⑫ 带文件的本地目录已在远端创建", remoteDir is not null && remoteDir.is_dir);
+        Check("⑫ 目录里的两个文件在本地都还在(数据安全)",
+            File.Exists(Path.Combine(dirPath, "a.txt")) && File.Exists(Path.Combine(dirPath, "b.txt")));
+        var remoteChildren = remoteDir is null ? 0 : (await files.ListAsync(space.id, remoteDir.id)).Count;
+        Check("⑫ 目录里的两个文件都上传了", remoteChildren == 2, $"远端子项={remoteChildren}");
+        if (remoteChildren != 2)
+        {
+            await DiagAsync("withfiles");
+        }
+
+        // ②b 多级目录:**一次对账**就要把中间层也建出来。
+        // 这条专门盯住"本轮新建的目录不参与本轮删除判定"这个修复:
+        // `p/q/r` 里的 p、p/q 是 `EnsureParentDirAsync` 顺带建的(不是循环里显式建的那个),
+        // 只把显式建的目录写进快照挡不住它们被当成"远端已无"而删掉本地目录。
+        var deepRel = $"{dirPrefix}-deep/p/q/r";
+        var deepFull = Path.Combine(root, deepRel.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(deepFull);
+        await File.WriteAllTextAsync(Path.Combine(deepFull, "deep.txt"), "deep");
+        await host.ReconcileAsync();
+        var deepParts = deepRel.Split('/');
+        var deepLocalOk = true;
+        var acc = "";
+        foreach (var part in deepParts)
+        {
+            acc = acc.Length == 0 ? part : acc + "/" + part;
+            deepLocalOk &= Directory.Exists(Path.Combine(root, acc.Replace('/', Path.DirectorySeparatorChar)));
+        }
+        Check("⑫ 多级目录一次对账建成后,本地各层都还在(数据安全)", deepLocalOk);
+        // 远端逐层核对:必须**从同步根开始一层层走**(少走一层就会误判成"没建出来")
+        EntryView? deepCursor = null;
+        var deepRemoteOk = true;
+        string? deepMissing = null;
+        for (var i = 0; i < deepParts.Length; i++)
+        {
+            deepCursor = await files.FindByNameAsync(space.id, deepCursor?.id, deepParts[i]);
+            if (deepCursor is not { is_dir: true })
+            {
+                deepRemoteOk = false;
+                deepMissing = string.Join('/', deepParts.Take(i + 1));
+                break;
+            }
+        }
+        Check("⑫ 多级目录的中间层也建到了远端(p/q/r 四层都在)", deepRemoteOk,
+            deepRemoteOk ? "" : $"远端缺:{deepMissing}");
+        var deepKids = deepCursor is null ? new List<EntryView>() : (await files.ListAsync(space.id, deepCursor.id)).ToList();
+        Check("⑫ 多级目录里的文件也上传了", deepKids.Count == 1,
+            $"{deepKids.Count} 项:[{string.Join(",", deepKids.Select(k => k.name))}] r.id={deepCursor?.id}");
+        if (deepKids.Count != 1)
+        {
+            await DiagAsync("deep");
+        }
+
+        Directory.Delete(dirPath, recursive: true);
+        await host.ReconcileAsync();
+        Check("⑫ 本地删目录 → 远端整棵子树同步删除",
+            await files.FindByNameAsync(space.id, null, dirName) is null,
+            "远端目录仍在 = 目录删除没传播");
+
+        // ③ 远端删目录 → 本地目录同步删(连同子目录)
+        var remoteDelName = $"{dirPrefix}-remotedel";
+        var remoteDelPath = Path.Combine(root, remoteDelName);
+        Directory.CreateDirectory(Path.Combine(remoteDelPath, "sub"));
+        await File.WriteAllTextAsync(Path.Combine(remoteDelPath, "sub", "c.txt"), "c");
+        await host.ReconcileAsync();
+        var remoteDel = await files.FindByNameAsync(space.id, null, remoteDelName);
+        Check("⑫ 远端删除的前提:目录已上传", remoteDel is not null);
+        if (remoteDel is not null)
+        {
+            using var del = await api.SendRawAsync(HttpMethod.Delete,
+                $"/api/v1/files/{Uri.EscapeDataString(remoteDel.id)}",
+                contentFactory: null, headers: null, idempotent: true);
+            Console.WriteLine($"    远端删除目录 {remoteDelName} → {(int)del.StatusCode}");
+            await host.ReconcileAsync();
+            Check("⑫ 远端删目录 → 本地目录(含子目录)同步删除",
+                !Directory.Exists(remoteDelPath),
+                Directory.Exists(remoteDelPath) ? "本地目录仍在 = 远端删除没传播" : "");
+        }
+
+        // ④ **数据安全**:目录改名(暂不支持)绝不能把远端子树当"删除"删掉
+        var renameFrom = $"{dirPrefix}-renamefrom";
+        var renameFromPath = Path.Combine(root, renameFrom);
+        Directory.CreateDirectory(renameFromPath);
+        await File.WriteAllTextAsync(Path.Combine(renameFromPath, "keep.txt"), "must-survive");
+        await host.ReconcileAsync();
+        Check("⑫ 改名保护的前提:目录与文件已上传",
+            await files.FindByNameAsync(space.id, null, renameFrom) is not null);
+        Directory.Move(renameFromPath, Path.Combine(root, $"{dirPrefix}-renameto"));
+        await host.ReconcileAsync();
+        var stillThere = await files.FindByNameAsync(space.id, null, renameFrom);
+        Console.WriteLine(stillThere is not null
+            ? "    目录改名后:远端旧目录仍在(目录改名**尚未支持**,但没被误删 —— 这是刻意的保护)"
+            : "    目录改名后:远端旧目录已消失(说明走了删除路径 —— 若如此必须人工确认没有丢数据)");
+        Check("⑫ 目录改名不会导致远端子树被误删(数据安全)", stillThere is not null,
+            stillThere is null ? "远端旧目录被删了 —— 目录改名保护失效(会丢数据)" : "");
+
+        // 失败时把每文件状态表打出来(NETDISK_E2E_VERBOSE=1):失败往往是"某个文件停在
+        // Failed/待处理"造成的,而状态本身不会出现在通知里 —— 没有这张表就只能靠猜。
+        if (failures > 0 && Environment.GetEnvironmentVariable("NETDISK_E2E_VERBOSE") == "1")
+        {
+            Console.WriteLine("     [诊断] 同步状态表:");
+            foreach (var s in host.Status)
+            {
+                Console.WriteLine($"       {s.RelativePath} → {s.State} | {s.Message} | v={s.Version} p={s.ProgressPercent}");
+            }
+        }
     }
 }
 finally
