@@ -1047,6 +1047,72 @@ try
         Check("⑭ 没有任何副本记录的路径:CanResolveConflict = false",
             !rh.CanResolveConflict($"{prefix}-never-conflicted.txt"));
     }
+
+    // ------------------------------------------------ ⑮ 远端文件浏览器(只读)
+    // "看一眼服务器上有什么"绝不该改变任何一端的文件;而两个不同目录里的**同名**文件
+    // 预览落点若相同,"打开"就会打开另一个文件(界面上表现为"点开是旧内容",极难查)。
+    Console.WriteLine();
+    Console.WriteLine("— ⑮ 远端文件浏览器(只读浏览整个空间)");
+    {
+        var prefix = $"sync-check-{DateTime.Now:HHmmss}-browse";
+        var dirA = $"{prefix}-A";
+        var dirB = $"{prefix}-B";
+        // 用 API 直接造树:A/同名.txt、B/同名.txt(同名是刻意的,见上)
+        var rootA = await files.CreateDirectoryAsync(space.id, null, dirA);
+        var rootB = await files.CreateDirectoryAsync(space.id, null, dirB);
+        var stagingA = Path.Combine(work, "browse-a.txt");
+        var stagingB = Path.Combine(work, "browse-b.txt");
+        await File.WriteAllTextAsync(stagingA, "content-from-A");
+        await File.WriteAllTextAsync(stagingB, "content-from-B");
+        await files.UploadAsync(space.id, rootA.id, "同名.txt", stagingA);
+        await files.UploadAsync(space.id, rootB.id, "同名.txt", stagingB);
+
+        var browser = new RemoteBrowser(files, space.id);
+        var rootEntries = await browser.ListAsync(null, "");
+        Check("⑮ 能列出空间根(看到刚建的两个目录)",
+            rootEntries.Any(e => e.Name == dirA) && rootEntries.Any(e => e.Name == dirB));
+        Check("⑮ 目录排在文件前面(与资源管理器一致)",
+            rootEntries.TakeWhile(e => e.IsDir).All(e => e.IsDir));
+
+        var navA = await browser.FindByPathAsync(new[] { dirA, "同名.txt" });
+        Check("⑮ 按路径逐级定位到文件", navA is { IsDir: false },
+            navA is null ? "没找到" : navA.Path);
+        Check("⑮ 条目自带相对路径(界面不再自己拼路径)",
+            navA is not null && navA.Path == $"{dirA}/同名.txt", navA?.Path ?? "");
+        var levelA = await browser.ListAsync(rootA.id, dirA);
+        Check("⑮ 能列出某一层(目录下的文件名正确)",
+            levelA.Count == 1 && levelA[0].Name == "同名.txt" && levelA[0].SizeText.Length > 0,
+            string.Join(",", levelA.Select(e => e.Name)));
+
+        // 预览下载:落点在临时目录、且不污染同步目录
+        var previewA = await browser.DownloadToTempAsync(navA!);
+        var tempRoot = Path.GetFullPath(Path.GetTempPath());
+        Check("⑮ 预览落点在**临时目录**(不在同步目录里)",
+            Path.GetFullPath(previewA).StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase)
+            && !Path.GetFullPath(previewA).StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase),
+            previewA);
+        Check("⑮ 浏览不改本地同步副本(同步目录里没有多出文件)",
+            !File.Exists(Path.Combine(root, "同名.txt")) &&
+            Directory.GetFiles(root, "同名.txt", SearchOption.AllDirectories).Length == 0);
+        Check("⑮ 预览内容 = 远端内容", await File.ReadAllTextAsync(previewA) == "content-from-A");
+
+        var navB = await browser.FindByPathAsync(new[] { dirB, "同名.txt" });
+        var previewB = await browser.DownloadToTempAsync(navB!);
+        Check("⑮ 不同目录的**同名**文件预览落点不冲突", previewA != previewB,
+            $"{Path.GetFileName(previewA)} vs {Path.GetFileName(previewB)}");
+        Check("⑮ 两份预览各自是正确的那一份(没有互相覆盖)",
+            await File.ReadAllTextAsync(previewA) == "content-from-A"
+            && await File.ReadAllTextAsync(previewB) == "content-from-B");
+
+        // 只读:浏览/预览之后,远端条目的 id 与版本都不该变
+        var afterBrowse = await files.FindByNameAsync(space.id, rootA.id, "同名.txt");
+        Check("⑮ 浏览是**只读**的(远端条目 id 与版本都没变)",
+            afterBrowse is not null && afterBrowse.id == navA!.Id && afterBrowse.version == navA.Version,
+            $"id={afterBrowse?.id} v={afterBrowse?.version}");
+
+        Check("⑮ 路径不存在时返回 null(而不是抛异常)",
+            await browser.FindByPathAsync(new[] { $"{prefix}-does-not-exist", "同名.txt" }) is null);
+    }
 }
 finally
 {

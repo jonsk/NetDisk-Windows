@@ -71,6 +71,7 @@ public partial class MainWindow : Window
         if (old is not null)
         {
             Sync.Detach();
+            Remote.Detach();
             old.Host.StatusChanged -= OnStatusChanged;
             old.Host.Notice -= OnEngineNotice;
             await old.DisposeAsync();
@@ -83,6 +84,7 @@ public partial class MainWindow : Window
             await fresh.DisposeAsync();
             AppLog.Write("app", "按新配置重启同步失败:令牌不可用或配置不完整,退回登录页");
             Sync.Detach();
+            Remote.Detach();
             ShowLogin();
             return;
         }
@@ -103,6 +105,7 @@ public partial class MainWindow : Window
         if (old is not null)
         {
             Sync.Detach();
+            Remote.Detach();
             old.Host.StatusChanged -= OnStatusChanged;
             old.Host.Notice -= OnEngineNotice;
             try
@@ -134,6 +137,8 @@ public partial class MainWindow : Window
         // 团队空间页也要用**带令牌**的客户端:否则它在真实使用中只能匿名请求,
         // 表现是"空间列表永远是空的"(而用户会以为是没有空间)。
         Spaces.Attach(runtime.Api);
+        // 远端文件浏览器:只读地看整个空间(与同步共用同一条已注入令牌的连接)
+        Remote.Attach(runtime);
         Settings.Attach(runtime);
         runtime.Host.StatusChanged += OnStatusChanged;
         // 先补记历史:头几轮对账的进展发生在订阅之前(引擎在 StartAsync 里就开始了),

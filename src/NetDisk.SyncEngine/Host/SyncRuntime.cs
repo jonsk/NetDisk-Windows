@@ -29,6 +29,7 @@ public sealed class SyncRuntime : IAsyncDisposable
         Session = session;
         Api = api;
         Host = host;
+        Browser = new NetDisk.SyncEngine.Files.RemoteBrowser(new NetDisk.SyncEngine.Files.FileApi(api), config.SpaceId);
         // 构造时就订阅:保证**从第一条**进展开始记录,不受调用方订阅时机影响
         Host.Notice += OnHostNotice;
     }
@@ -38,6 +39,13 @@ public sealed class SyncRuntime : IAsyncDisposable
     public TokenSession Session { get; }
 
     public ApiClient Api { get; }
+
+    /// <summary>
+    /// 远端文件浏览器(只读:看**整个空间**的结构,而不是只看同步目录里那一份)。
+    /// 与同步共用同一条已注入令牌的连接 —— 界面不需要自己造客户端,也就不会漏注入令牌
+    /// (漏注入的表现是"列表永远空的",极易被误判成服务端问题)。
+    /// </summary>
+    public NetDisk.SyncEngine.Files.RemoteBrowser Browser { get; }
 
     public SyncHost Host { get; }
 
