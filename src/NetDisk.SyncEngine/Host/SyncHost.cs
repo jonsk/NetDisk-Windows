@@ -440,7 +440,13 @@ public sealed class SyncHost : IAsyncDisposable
         // 且 `MaxEntries` 超限是**静默截断** —— 这两条会让"看不见"伪装成"已删除"。
         // 若照此传播,一次权限抖动或一次 ACL 变更就会把远端文件删光(服务端是**硬删、无回收站**)。
         // 同理远端侧:列举失败会抛异常(不静默返回短列表),所以"列完了"这件事本身可信。
-        var deletions = await PropagateDeletionsAsync(spaceId, remote, renames, scan, ct).ConfigureAwait(false);
+        //
+        // ⚠ **只读浏览(仅结构)模式下一律不传播删除**(见 ClientConfig.StructureOnly):
+        // 那个模式的语义是"看看结构",而删除是**不可逆**的写操作(服务端硬删、无回收站),
+        // 让一个"只读浏览"把远端文件删掉,是这个模式最不该发生的事。
+        var deletions = _config.StructureOnly
+            ? 0
+            : await PropagateDeletionsAsync(spaceId, remote, renames, scan, ct).ConfigureAwait(false);
         if (deletions > 0)
         {
             Notice?.Invoke($"删除传播:本轮两端共删除 {deletions} 个文件");
@@ -452,6 +458,13 @@ public sealed class SyncHost : IAsyncDisposable
             if (renames.OldPaths.Contains(rel))
             {
                 continue; // 本地已改名带走:内容在新名字那边,改名由下面的阶段推送
+            }
+            if (_config.StructureOnly)
+            {
+                // 只读浏览:文件**不落盘**,但要在状态列表里如实出现(名字/大小/远端版本),
+                // 否则用户看到的是一个"目录里什么都没有"的假象。
+                Upsert(rel, SyncState.StructureOnly, "只读浏览:仅同步目录结构,未下载内容", entry.version);
+                continue;
             }
             var local = LocalOf(rel);
             var known = KnownVersion(rel);
@@ -479,12 +492,25 @@ public sealed class SyncHost : IAsyncDisposable
 
         Notice?.Invoke("对账:进入本地上传阶段");
         // ② 本地 → 远端(新文件 / 本地改动 / **本地改名**)
+        //
+        // ⚠ **只读浏览(仅结构)模式:一个字节都不上传**(见 ClientConfig.StructureOnly)。
+        // 这条规则同样不能只写在界面上:模式的语义是"只看远端结构",而上传会**改远端**。
+        // 本地多出来的文件要如实显示成「仅结构:未上传」,不能假装它们已经在远端了。
         foreach (var item in ScanLocal())
         {
             ct.ThrowIfCancellationRequested();
             var rel = item.RelativePath;
             var known = KnownVersion(rel);
             var remoteHas = remote.TryGetValue(rel, out var remoteEntry);
+
+            if (_config.StructureOnly)
+            {
+                if (!remoteHas)
+                {
+                    Upsert(rel, SyncState.StructureOnly, "只读浏览:仅同步目录结构,本地文件未上传(仅结构模式)", 0);
+                }
+                continue;
+            }
 
             // ②a 改名识别(必须在"当成新文件上传"之前做)。判据由 DetectLocalRenames
             // 预先算好:新路径没记过、远端也没有它、而它的本机文件身份对得上某个
@@ -857,8 +883,21 @@ public sealed class SyncHost : IAsyncDisposable
         Notice?.Invoke($"{(job.Direction == TransferDirection.Upload ? "上传" : "下载")}失败 {rel}:{ex.Message}(下一轮对账会重试)");
     }
 
+    /// <summary>
+    /// 停止同步并释放资源。**幂等**:重复调用是空操作。
+    ///
+    /// 为什么必须幂等(真机实测):`SyncHostCheck` ⑬ 里一个"显式 Dispose + await using"
+    /// 的双重释放,把进程以**未处理异常**打崩:
+    /// `ObjectDisposedException: The CancellationTokenSource has been disposed.`
+    /// 而这条路径在真实客户端里也存在(设置页"保存并重启同步"会先释放旧运行时,
+    /// 作用域退出时还会再释放一次)—— 崩溃点在**退出/重启**这种最不该崩的时刻。
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return; // 已经释放过(第二次调用直接返回,而不是对着已释放的 CTS/连接再操作一遍)
+        }
         _running = false;
         if (_watcher is not null)
         {
@@ -889,6 +928,9 @@ public sealed class SyncHost : IAsyncDisposable
         await _queue.DisposeAsync().ConfigureAwait(false);
         _store.Dispose();
     }
+
+    /// <summary>释放标记(见 <see cref="DisposeAsync"/>:二次释放必须是空操作)。</summary>
+    private int _disposed;
 
     // ---------------------------------------------------------------- SQLite 状态库
 
@@ -1280,6 +1322,13 @@ public sealed class SyncHost : IAsyncDisposable
             {
                 continue;
             }
+            // 只读浏览(仅结构):**不在远端建目录** —— 那是写操作,与"只看结构"矛盾。
+            // 本地多出来的目录要如实显示出来(否则用户以为它已经在远端了)。
+            if (_config.StructureOnly)
+            {
+                Upsert(rel, SyncState.StructureOnly, "只读浏览:仅同步目录结构,本地目录未在远端创建(仅结构模式)", 0);
+                continue;
+            }
             // ①a 先试"这其实是一次目录改名/移动"(远端同一条目换位置,不重传子文件)
             if (dirRenames.TryGetValue(rel, out var renamedFrom)
                 && await TryMoveDirAsync(rel, renamedFrom, remote, remoteDirs, renames, ct).ConfigureAwait(false))
@@ -1320,6 +1369,10 @@ public sealed class SyncHost : IAsyncDisposable
             // ② 本地已无 → 远端删子树
             if (!scan.Dirs.Contains(rel))
             {
+                if (_config.StructureOnly)
+                {
+                    continue; // 只读浏览:不删远端任何东西(②是删除,③才是"跟着远端走")
+                }
                 if (renames.OldPaths.Any(old => old.StartsWith(rel + "/", StringComparison.OrdinalIgnoreCase)))
                 {
                     Notice?.Invoke($"目录同步:{rel} 下面是**本地改名**带走的文件 —— 目录改名暂不支持,本轮不删(避免误删整棵子树)");

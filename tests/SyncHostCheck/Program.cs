@@ -861,6 +861,87 @@ try
             }
         }
     }
+
+    // ------------------------------------------------ ⑬ 只读浏览(仅结构)模式
+    // 语义三条(少一条就不是"只读浏览"):①远端结构照搬、内容不落盘;②本地文件不上传;③两端都不删。
+    // 这个模式的危险点很具体:它**看起来像**普通同步,一旦少了"不上传/不删"的闸,
+    // 用户以为只是在浏览,实际却在改远端。
+    Console.WriteLine();
+    Console.WriteLine("— ⑬ 只读浏览(仅结构)模式");
+    {
+        var prefix = $"sync-check-{DateTime.Now:HHmmss}";
+        // ① 先用**正常模式**在远端造出"一个目录 + 一个文件"(作为只读浏览的观察对象)
+        var normalRoot = Path.Combine(work, "root-normal");
+        Directory.CreateDirectory(normalRoot);
+        var normalCfgPath = Path.Combine(work, "client-normal.json");
+        var normalCfg = ClientConfig.Load(normalCfgPath);
+        normalCfg.BaseUrl = baseUrl;
+        normalCfg.SyncRoot = normalRoot;
+        normalCfg.SpaceId = space.id;
+        normalCfg.Onboarded = true;
+        normalCfg.Save();
+        var remoteDirName = $"{prefix}-dir";
+        var remoteFileName = $"{prefix}-remote.txt";
+        await using (var normal = SyncRuntime.FromStoredToken(ClientConfig.Load(normalCfgPath), tokenPath: tokenPath))
+        {
+            await normal.StartAsync();
+            Directory.CreateDirectory(Path.Combine(normalRoot, remoteDirName));
+            await File.WriteAllTextAsync(Path.Combine(normalRoot, remoteDirName, remoteFileName), "remote-content");
+            await normal.Host.ReconcileAsync();
+            // 不在 await using 作用域里再显式释放一次(那正是"二次释放"的写法;
+            // 引擎侧已按幂等修好,这里也没必要制造第二次调用)
+        }
+        var soRemoteDir = await files.FindByNameAsync(space.id, null, remoteDirName);
+        var soRemoteFile = soRemoteDir is null ? null : await files.FindByNameAsync(space.id, soRemoteDir.id, remoteFileName);
+        Check("⑬ 前提:远端目录与文件都已就绪",
+            soRemoteDir is { is_dir: true } && soRemoteFile is not null,
+            soRemoteDir is null ? "远端没有该目录" : $"文件={(soRemoteFile is null ? "缺" : "有")}");
+
+        // ② 切到只读浏览:**干净的本地根**(否则"没下载"会被上一次的残留文件掩盖)
+        var soRoot = Path.Combine(work, "root-structure");
+        Directory.CreateDirectory(soRoot);
+        var soCfgPath = Path.Combine(work, "client-structure.json");
+        var soCfg = ClientConfig.Load(soCfgPath);
+        soCfg.BaseUrl = baseUrl;
+        soCfg.SyncRoot = soRoot;
+        soCfg.SpaceId = space.id;
+        soCfg.Onboarded = true;
+        soCfg.StructureOnly = true;
+        soCfg.Save();
+
+        await using var so = new SyncHost(ClientConfig.Load(soCfgPath), BuildTokenSession(), api,
+            statePath: Path.Combine(work, "state-structure.db"), watchLocal: false);
+        await so.StartAsync();
+        await so.ReconcileAsync();
+
+        Check("⑬ 只读浏览:远端**目录结构**照常建到本地",
+            Directory.Exists(Path.Combine(soRoot, remoteDirName)));
+        Check("⑬ 只读浏览:远端文件**不落盘**(内容不下载)",
+            !File.Exists(Path.Combine(soRoot, remoteDirName, remoteFileName)));
+        Check("⑬ 只读浏览:文件在状态列表里如实出现(标为「仅结构」而不是「下载中」)",
+            so.Status.Any(s => s.State == SyncState.StructureOnly
+                               && string.Equals(s.RelativePath, $"{remoteDirName}/{remoteFileName}", StringComparison.OrdinalIgnoreCase)),
+            string.Join(",", so.Status.Select(s => $"{s.RelativePath}:{s.State}")));
+        Check("⑬ 只读浏览:远端文件仍在(没有因为「本地没有」而被当成删除)",
+            soRemoteDir is not null && await files.FindByNameAsync(space.id, soRemoteDir.id, remoteFileName) is not null);
+
+        // ③ 本地新增 → 不上传;本地删目录 → 不删远端
+        var localOnly = $"{prefix}-local-only.txt";
+        await File.WriteAllTextAsync(Path.Combine(soRoot, localOnly), "local");
+        await so.ReconcileAsync();
+        Check("⑬ 只读浏览:本地文件**不上传**", await files.FindByNameAsync(space.id, null, localOnly) is null);
+        Check("⑬ 只读浏览:本地多出来的文件显示为「未上传」",
+            so.Status.Any(s => string.Equals(s.RelativePath, localOnly, StringComparison.OrdinalIgnoreCase)
+                               && s.Message.Contains("未上传", StringComparison.Ordinal)));
+
+        Directory.Delete(Path.Combine(soRoot, remoteDirName), recursive: true);
+        await so.ReconcileAsync();
+        Check("⑬ 只读浏览:本地删目录**不传播**到远端(只读语义)",
+            await files.FindByNameAsync(space.id, null, remoteDirName) is not null);
+        Check("⑬ 只读浏览:没有条目被标成「远端已删除」",
+            !so.Status.Any(s => s.State == SyncState.PendingRemoteGone),
+            string.Join(",", so.Status.Select(s => $"{s.RelativePath}:{s.State}")));
+    }
 }
 finally
 {

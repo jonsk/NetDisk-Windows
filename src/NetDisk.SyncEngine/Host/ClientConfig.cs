@@ -66,11 +66,27 @@ public sealed class ClientConfig
     [JsonPropertyName("download_kbps")]
     public int DownloadKbps { get; set; }
 
+    /// <summary>
+    /// **只读浏览(仅结构)模式**:只把远端的**目录结构**搬到本地,不下载文件内容、也不上传本地文件,
+    /// 并且**不传播任何删除**(只读)。
+    ///
+    /// 为什么要有它:大容量空间里"我只想看看结构"与"我要完整同步"是两种完全不同的用法 ——
+    /// 前者不该为了看一眼目录树把几百 GB 拉到本机。默认关(false)= 完整同步。
+    ///
+    /// 落到行为上是三条硬规则(少一条就不是"只读浏览"):
+    ///   ① 远端文件**不落盘**(在状态列表里显示为「仅结构」,用户看得到名字与大小);
+    ///   ② 本地文件**不上传**;
+    ///   ③ 两端**都不删**(只读 = 不改远端,也不动用户本地的东西)。
+    /// </summary>
+    [JsonPropertyName("structure_only")]
+    public bool StructureOnly { get; set; }
+
     /// <summary>面向用户的字段说明(首次运行生成配置时写进去,免得用户对着 JSON 猜)。</summary>
     [JsonPropertyName("_说明")]
     public string Help { get; set; } =
         "base_url=服务器地址;sync_root=本地同步目录;max_concurrency=并发数(1-16);" +
         "upload_kbps/download_kbps=限速(KB/s,0=不限);logging=是否记录日志(日志在 logs\\client.log);" +
+        "structure_only=只读浏览(仅结构,不下载/不上传/不删);" +
         "onboarded=是否已完成首次运行。删掉本文件会在下次启动时重新生成。";
 
     [JsonIgnore]

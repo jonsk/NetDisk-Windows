@@ -175,10 +175,12 @@ public partial class SyncView : System.Windows.Controls.UserControl
         var conflicts = status.Count(s => s.State == SyncState.Conflict);
         var errors = status.Count(s => s.State is SyncState.SpaceRevoked
             or SyncState.PermissionLimited or SyncState.PendingRemoteGone or SyncState.Failed);
+        var structureOnly = status.Count(s => s.State == SyncState.StructureOnly);
 
         SummaryText.Text = status.Count == 0
             ? "尚无文件(同步目录为空,或还没完成第一次对账)"
-            : $"共 {status.Count} 个文件:已同步 {synced} · 上传中 {uploading} · 下载中 {downloading} · 冲突 {conflicts} · 错误 {errors}";
+            : $"共 {status.Count} 个文件:已同步 {synced} · 上传中 {uploading} · 下载中 {downloading} · 冲突 {conflicts} · 错误 {errors}"
+              + (structureOnly > 0 ? $" · 仅结构(未搬内容){structureOnly}" : "");
     }
 
     /// <summary>状态 → 中文。纯展示映射:引擎加状态时这里必须跟着加(编译器会提醒)。</summary>
@@ -192,6 +194,7 @@ public partial class SyncView : System.Windows.Controls.UserControl
         SyncState.SpaceRevoked => "空间已移除",
         SyncState.PermissionLimited => "权限受限",
         SyncState.Failed => "失败",
+        SyncState.StructureOnly => "仅结构",
         _ => state.ToString(),
     };
 

@@ -41,6 +41,7 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         UploadBox.Text = runtime.Config.UploadKbps.ToString();
         DownloadBox.Text = runtime.Config.DownloadKbps.ToString();
         LogCheck.IsChecked = runtime.Config.Logging;
+        StructureOnlyCheck.IsChecked = runtime.Config.StructureOnly;
         PathText.Text = $"配置文件:{runtime.Config.Path}\n" +
                         $"数据目录:{ClientPaths.DataDirectory}" +
                         (ClientPaths.FallbackReason is { } why ? $" (回退:{why})" : "");
@@ -109,11 +110,13 @@ public partial class SettingsView : System.Windows.Controls.UserControl
             _config.UploadKbps = upKbps;
             _config.DownloadKbps = downKbps;
             _config.Logging = LogCheck.IsChecked == true;
+            _config.StructureOnly = StructureOnlyCheck.IsChecked == true;
             _config.Save();
             AppLog.Enabled = _config.Logging;
             AppLog.Write("app",
                 $"设置已保存:服务器={baseUrl} 同步目录={root} 并发={concurrency} " +
-                $"上行限速={upKbps}KB/s 下行限速={downKbps}KB/s 日志={_config.Logging}");
+                $"上行限速={upKbps}KB/s 下行限速={downKbps}KB/s 日志={_config.Logging} " +
+                $"只读浏览(仅结构)={_config.StructureOnly}");
 
             StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
             StatusText.Text = "正在按新配置重启同步…";
