@@ -474,14 +474,34 @@ public sealed class SyncHost : IAsyncDisposable
             }
             else if (entry.version > known)
             {
-                // 远端更新:本地没改过就直接覆盖;本地也改过 → 冲突副本
+                // 远端更新:本地没改过就直接覆盖;本地也改过 → 冲突
                 if (LocalLooksChanged(rel))
                 {
-                    var conflictPath = MakeConflictCopy(rel);
-                    var conflictName = Path.GetFileName(conflictPath);
-                    await DownloadAsync(entry, rel, ct,
-                        (SyncState.Conflict, $"两端都改了;本地版本已保留为 {conflictName}")).ConfigureAwait(false);
-                    Notice?.Invoke($"冲突:已保留本地副本 {conflictName}");
+                    // 用户在设置里预先定了"冲突怎么办"就直接办(无人值守);默认"都保留"。
+                    switch (ConflictPolicyOf(_config.OnConflict))
+                    {
+                        case ConflictPolicy.KeepRemote:
+                            // 以远端为准:本地改动**被丢弃**(用户在设置里明确选的)
+                            Notice?.Invoke($"冲突:{rel} 按设置「以远端为准」覆盖本地(本地改动不再保留副本)");
+                            await DownloadAsync(entry, rel, ct,
+                                (SyncState.InSync, "冲突:按设置「以远端为准」覆盖了本地")).ConfigureAwait(false);
+                            break;
+                        case ConflictPolicy.KeepLocal:
+                            // 以本地为准:把本地那一版原地覆盖到远端(同一 file_id,版本 +1)
+                            Notice?.Invoke($"冲突:{rel} 按设置「以本地为准」覆盖远端(远端那一版不再保留副本)");
+                            await UploadAsync(rel, entry, ct).ConfigureAwait(false);
+                            break;
+                        default:
+                            var conflictPath = MakeConflictCopy(rel);
+                            var conflictName = Path.GetFileName(conflictPath);
+                            // 记住"哪个本地副本对应这条路径":界面上的"以本地/以远端为准"要用它。
+                            // 只活在本次运行内 —— 与"冲突徽标不跨重启"这条既有边界一致(见文档)。
+                            _conflictCopies[rel] = conflictPath;
+                            await DownloadAsync(entry, rel, ct,
+                                (SyncState.Conflict, $"两端都改了;本地版本已保留为 {conflictName}")).ConfigureAwait(false);
+                            Notice?.Invoke($"冲突:已保留本地副本 {conflictName}");
+                            break;
+                    }
                 }
                 else
                 {
@@ -816,6 +836,109 @@ public sealed class SyncHost : IAsyncDisposable
         {
             var i = _status.FindIndex(s => string.Equals(s.RelativePath, rel, StringComparison.OrdinalIgnoreCase));
             return i >= 0 ? _status[i].State : null;
+        }
+    }
+
+    // ---------------------------------------------------------------- 冲突解决
+
+    /// <summary>冲突策略(设置里的 `on_conflict`;默认都保留)。</summary>
+    private static ConflictPolicy ConflictPolicyOf(string? raw) => raw switch
+    {
+        "keep_remote" => ConflictPolicy.KeepRemote,
+        "keep_local" => ConflictPolicy.KeepLocal,
+        _ => ConflictPolicy.KeepBoth, // 未知值一律落到默认,而不是"没有策略"
+    };
+
+    /// <summary>
+    /// 本次运行里"哪条路径的本地那一版被保留成了哪个副本文件"(`MakeConflictCopy` 时记下)。
+    ///
+    /// 为什么只在内存里:冲突**徽标**本来就不跨重启(既有边界),而副本文件本身就是用户的数据 ——
+    /// 重启后副本还在磁盘上,只是界面不再知道"它对应哪条冲突"。把这条边界写在文档里,
+    /// 比"重启后按钮点了没反应"要好。
+    /// </summary>
+    private readonly Dictionary<string, string> _conflictCopies = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>这条路径当前有没有"可解决的冲突"(即本次运行内还记得它的本地副本)。</summary>
+    public bool CanResolveConflict(string rel)
+    {
+        lock (_conflictCopies)
+        {
+            return _conflictCopies.ContainsKey(rel) && File.Exists(LongPath.ToExtended(_conflictCopies[rel]));
+        }
+    }
+
+    /// <summary>
+    /// **逐文件解决冲突**(界面上的「以本地为准 / 以远端为准 / 都保留」)。
+    ///
+    /// 冲突发生后的磁盘状态:原路径 `rel` 上是**远端那一版**,本地那一版被另存成了副本文件。
+    /// 三个选择的动作因此是:
+    ///   · <see cref="ConflictResolution.KeepLocal"/>:把副本内容写回原路径,再**原地覆盖**上传
+    ///     (同一 file_id、版本 +1),然后删掉副本(它已经被应用了);
+    ///   · <see cref="ConflictResolution.KeepRemote"/>:远端那一版已经在原路径上,直接**删掉副本**
+    ///     (用户明确选了"以远端为准"= 放弃本地改动),并清掉冲突标记;
+    ///   · <see cref="ConflictResolution.KeepBoth"/>:副本留着,由对账把它当**新文件**传上去
+    ///     (两份都在),清掉冲突标记。
+    ///
+    /// 返回 false 表示**解决不了**(例如冲突来自上一次运行:这次运行不知道副本是哪一个)——
+    /// 调用方应如实告诉用户,而不是把条目显示成"已解决"。
+    /// </summary>
+    public async Task<bool> ResolveConflictAsync(
+        string rel, ConflictResolution choice, CancellationToken ct = default)
+    {
+        string copyPath;
+        lock (_conflictCopies)
+        {
+            if (!_conflictCopies.TryGetValue(rel, out var recorded) || !File.Exists(LongPath.ToExtended(recorded)))
+            {
+                Notice?.Invoke($"冲突:{rel} 没有可用的本地副本记录(可能来自上一次运行)——请手动处理这两个文件");
+                return false;
+            }
+            copyPath = recorded;
+        }
+
+        try
+        {
+            var local = LocalOf(rel);
+            switch (choice)
+            {
+                case ConflictResolution.KeepLocal:
+                    // 副本 → 原路径,然后**原地覆盖**远端(必须带远端条目,否则会被 409 拒掉)
+                    File.Copy(LongPath.ToExtended(copyPath), LongPath.ToExtended(local), overwrite: true);
+                    var spaceId = await ResolveSpaceIdAsync(ct).ConfigureAwait(false);
+                    var remoteEntry = await _files.FindByRelativePathAsync(spaceId, rel, ct).ConfigureAwait(false);
+                    await UploadAsync(rel, remoteEntry, ct).ConfigureAwait(false);
+                    File.Delete(LongPath.ToExtended(copyPath));
+                    Upsert(rel, SyncState.PendingUpload, "冲突已按「以本地为准」处理:正在覆盖远端", KnownVersion(rel));
+                    Notice?.Invoke($"冲突:{rel} 已按「以本地为准」覆盖远端,本地副本已合并删除");
+                    break;
+
+                case ConflictResolution.KeepRemote:
+                    // 远端那一版已经在 rel 上;删掉副本 = 放弃本地改动(用户明确选的)
+                    File.Delete(LongPath.ToExtended(copyPath));
+                    Upsert(rel, SyncState.InSync, "冲突已按「以远端为准」处理(本地改动已放弃)", KnownVersion(rel));
+                    Notice?.Invoke($"冲突:{rel} 已按「以远端为准」处理,本地副本已删除");
+                    break;
+
+                default: // KeepBoth
+                    // 副本留着,交给下一轮对账当新文件上传(两份都保留)
+                    Upsert(rel, SyncState.InSync, "冲突已按「都保留」处理(本地那一版作为副本上传)", KnownVersion(rel));
+                    Notice?.Invoke($"冲突:{rel} 两份都保留:副本 {Path.GetFileName(copyPath)} 会作为新文件上传");
+                    break;
+            }
+
+            lock (_conflictCopies)
+            {
+                _conflictCopies.Remove(rel);
+            }
+            // 解决完立即把结果推给两端(不需要等下一轮 5 分钟的对账)
+            await ReconcileAsync(ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Upsert(rel, SyncState.Conflict, $"冲突解决失败:{ex.Message}", KnownVersion(rel));
+            Notice?.Invoke($"冲突解决失败 {rel}:{ex.Message}");
+            return false;
         }
     }
 

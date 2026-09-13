@@ -13,6 +13,7 @@
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
     <StackPanel Grid.Row="0">
@@ -46,10 +47,24 @@
       </ListView.View>
     </ListView>
 
-    <TextBlock Grid.Row="3" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap"
-               Text="状态含义:已同步 = 两端一致;上传中/下载中 = 正在传输;冲突 = 两端都改过,本地版本已另存为冲突副本;错误 = 需要处理的失败。" />
-    <TextBlock Grid.Row="4" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap"
+    <!-- 冲突处理(逐文件):先在列表里选中一行「冲突」,再点其中之一。
+         为什么必须让用户自己点:引擎的默认做法是"两份都保留"(不丢数据),而覆盖
+         无论往哪边覆盖都是**丢一份**,所以只有用户明确选择才做。 -->
+    <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+      <TextBlock VerticalAlignment="Center" Foreground="#555"
+                 Text="冲突处理(先选中列表里的「冲突」行):" />
+      <Button x:Name="KeepLocalButton" Margin="8,0,0,0" Padding="12,4"
+              Content="以本地为准(覆盖远端)" Click="OnResolveKeepLocal" />
+      <Button x:Name="KeepRemoteButton" Margin="6,0,0,0" Padding="12,4"
+              Content="以远端为准(覆盖本地)" Click="OnResolveKeepRemote" />
+      <Button x:Name="KeepBothButton" Margin="6,0,0,0" Padding="12,4"
+              Content="都保留" Click="OnResolveKeepBoth" />
+    </StackPanel>
+
+    <TextBlock Grid.Row="4" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap"
+               Text="状态含义:已同步 = 两端一致;上传中/下载中 = 正在传输;冲突 = 两端都改过,本地版本已另存为冲突副本,可用上面的按钮处理;失败 = 需要处理的失败;仅结构 = 只读浏览模式下未搬内容。" />
+    <TextBlock Grid.Row="5" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap"
                Text="删除是双向同步的:在同步目录里删掉文件,服务器上也会删;另一端删掉的文件,这里也会删。删除在服务端不可恢复,且删掉的文件不会再出现在上面的列表里(可在日志里查记录)。" />
-    <TextBlock x:Name="LogPathText" Grid.Row="5" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap" />
+    <TextBlock x:Name="LogPathText" Grid.Row="6" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap" />
   </Grid>
 </UserControl>

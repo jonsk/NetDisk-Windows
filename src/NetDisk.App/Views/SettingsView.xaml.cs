@@ -42,6 +42,12 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         DownloadBox.Text = runtime.Config.DownloadKbps.ToString();
         LogCheck.IsChecked = runtime.Config.Logging;
         StructureOnlyCheck.IsChecked = runtime.Config.StructureOnly;
+        ConflictCombo.SelectedIndex = runtime.Config.OnConflict switch
+        {
+            "keep_local" => 1,
+            "keep_remote" => 2,
+            _ => 0, // 未知值/默认 = 都保留(与引擎的归一化一致:未知一律落到"不丢数据"那条)
+        };
         PathText.Text = $"配置文件:{runtime.Config.Path}\n" +
                         $"数据目录:{ClientPaths.DataDirectory}" +
                         (ClientPaths.FallbackReason is { } why ? $" (回退:{why})" : "");
@@ -111,12 +117,18 @@ public partial class SettingsView : System.Windows.Controls.UserControl
             _config.DownloadKbps = downKbps;
             _config.Logging = LogCheck.IsChecked == true;
             _config.StructureOnly = StructureOnlyCheck.IsChecked == true;
+            _config.OnConflict = ConflictCombo.SelectedIndex switch
+            {
+                1 => "keep_local",
+                2 => "keep_remote",
+                _ => "keep_both",
+            };
             _config.Save();
             AppLog.Enabled = _config.Logging;
             AppLog.Write("app",
                 $"设置已保存:服务器={baseUrl} 同步目录={root} 并发={concurrency} " +
                 $"上行限速={upKbps}KB/s 下行限速={downKbps}KB/s 日志={_config.Logging} " +
-                $"只读浏览(仅结构)={_config.StructureOnly}");
+                $"只读浏览(仅结构)={_config.StructureOnly} 冲突策略={_config.OnConflict}");
 
             StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
             StatusText.Text = "正在按新配置重启同步…";

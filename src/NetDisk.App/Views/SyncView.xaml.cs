@@ -30,6 +30,9 @@ public sealed class SyncRow
     public required string ProgressText { get; init; }
 
     public required long Version { get; init; }
+
+    /// <summary>是否处于「冲突」态(界面据此决定"冲突处理"按钮能不能点)。</summary>
+    public bool IsConflict => StateText == "冲突";
 }
 
 // 基类写全限定名(与既有视图一致):UseWPF + UseWindowsForms 同时开启时
@@ -153,6 +156,44 @@ public partial class SyncView : System.Windows.Controls.UserControl
     {
         Dispatcher.BeginInvoke(new Action(() => NoticeText.Text = message));
     }
+
+    /// <summary>
+    /// 冲突处理:对列表里**选中的那一行**执行用户的选择。
+    ///
+    /// 三条纪律:
+    ///   ① 只对「冲突」行生效 —— 对普通行点"以本地为准"会变成一次未经确认的覆盖写;
+    ///   ② 结果如实回报:引擎说 `false`(例如冲突来自上一次运行、这次运行不知道副本是哪个)
+    ///      就照实说"处理不了,请手动处理这两个文件",**不能**显示成"已解决";
+    ///   ③ 动作在引擎里做(`SyncHost.ResolveConflictAsync`),界面不碰文件 —— 否则
+    ///      "以本地为准"会变成"界面直接把本地文件覆盖到远端",而那条路没有乐观锁、没有冲突裁决。
+    /// </summary>
+    private async Task ResolveAsync(ConflictResolution choice, string choiceText)
+    {
+        if (_runtime is null)
+        {
+            NoticeText.Text = "同步还没启动,无法处理冲突。";
+            return;
+        }
+        if (StatusList.SelectedItem is not SyncRow row || !row.IsConflict)
+        {
+            NoticeText.Text = "请先在上面的列表里**选中一行「冲突」**,再点这个按钮。";
+            return;
+        }
+        NoticeText.Text = $"正在按「{choiceText}」处理 {row.File}…";
+        var ok = await _runtime.Host.ResolveConflictAsync(row.File, choice);
+        NoticeText.Text = ok
+            ? $"已按「{choiceText}」处理 {row.File}。"
+            : $"{row.File} 处理不了(可能是上一次运行留下的冲突):请手动比对本地副本与服务器上的版本。";
+    }
+
+    private async void OnResolveKeepLocal(object sender, RoutedEventArgs e) =>
+        await ResolveAsync(ConflictResolution.KeepLocal, "以本地为准");
+
+    private async void OnResolveKeepRemote(object sender, RoutedEventArgs e) =>
+        await ResolveAsync(ConflictResolution.KeepRemote, "以远端为准");
+
+    private async void OnResolveKeepBoth(object sender, RoutedEventArgs e) =>
+        await ResolveAsync(ConflictResolution.KeepBoth, "都保留");
 
     private void Render(IReadOnlyList<SyncEntryStatus> status)
     {

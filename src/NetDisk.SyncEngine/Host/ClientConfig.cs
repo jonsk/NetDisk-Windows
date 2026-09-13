@@ -81,12 +81,23 @@ public sealed class ClientConfig
     [JsonPropertyName("structure_only")]
     public bool StructureOnly { get; set; }
 
+    /// <summary>
+    /// 两端都改了同一个文件时怎么办(无人值守策略):<c>keep_both</c>(默认)/ <c>keep_local</c> / <c>keep_remote</c>。
+    ///
+    /// 默认 <c>keep_both</c>:本地那一版另存为副本、远端那一版留在原路径 —— 处理冲突的三条路里,
+    /// 只有它是**不丢数据**的,所以当默认;另外两条都是"用一个覆盖另一个",必须由用户明确选。
+    /// 无论选哪条,界面上仍可对**这一次**冲突逐个改主意(见 <c>SyncHost.ResolveConflictAsync</c>)。
+    /// </summary>
+    [JsonPropertyName("on_conflict")]
+    public string OnConflict { get; set; } = "keep_both";
+
     /// <summary>面向用户的字段说明(首次运行生成配置时写进去,免得用户对着 JSON 猜)。</summary>
     [JsonPropertyName("_说明")]
     public string Help { get; set; } =
         "base_url=服务器地址;sync_root=本地同步目录;max_concurrency=并发数(1-16);" +
         "upload_kbps/download_kbps=限速(KB/s,0=不限);logging=是否记录日志(日志在 logs\\client.log);" +
         "structure_only=只读浏览(仅结构,不下载/不上传/不删);" +
+        "on_conflict=冲突策略(keep_both=都保留[默认]/keep_local=以本地为准/keep_remote=以远端为准);" +
         "onboarded=是否已完成首次运行。删掉本文件会在下次启动时重新生成。";
 
     [JsonIgnore]

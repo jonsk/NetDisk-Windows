@@ -942,6 +942,111 @@ try
             !so.Status.Any(s => s.State == SyncState.PendingRemoteGone),
             string.Join(",", so.Status.Select(s => $"{s.RelativePath}:{s.State}")));
     }
+
+    // ------------------------------------------------ ⑭ 冲突解决(逐文件三选一 + 无人值守策略)
+    // 默认做法是"两份都保留"(不丢数据),但用户需要两条出路:设置里预先定好策略,
+    // 或者看到「冲突」后逐个挑一次。两者**不能合并**:一个是偏好,一个是一次决定。
+    Console.WriteLine();
+    Console.WriteLine("— ⑭ 冲突解决:以本地为准 / 以远端为准 / 都保留 + 无人值守策略");
+    {
+        var prefix = $"sync-check-{DateTime.Now:HHmmss}-resolve";
+
+        // 造一次**真实冲突**:本地改 + 远端原地覆盖(与 ④ 同一套做法)
+        async Task<(string Rel, string Copy)> MakeConflictAsync(SyncHost h, string rel, string localText, string remoteText)
+        {
+            await File.WriteAllTextAsync(Path.Combine(root, rel), localText);
+            await h.ReconcileAsync();                                   // 先传上去(v1)
+            await File.WriteAllTextAsync(Path.Combine(root, rel), localText + "-edited"); // 本地又改
+            var staging = Path.Combine(work, "remote-" + Guid.NewGuid().ToString("N")[..6] + ".txt");
+            await File.WriteAllTextAsync(staging, remoteText);
+            await files.UploadAsync(space.id, null, rel, staging, allowOverwrite: true);  // 另一端也改
+            await h.ReconcileAsync();                                   // → 冲突
+            var copies = Directory.GetFiles(root, Path.GetFileNameWithoutExtension(rel) + "_conflict_*");
+            return (rel, copies.FirstOrDefault() ?? "");
+        }
+
+        async Task<string> ServerTextAsync(string rel)
+        {
+            var e = await files.FindByNameAsync(space.id, null, rel);
+            if (e is null)
+            {
+                return "";
+            }
+            var tmp = Path.Combine(work, "dl-" + Guid.NewGuid().ToString("N")[..6] + ".txt");
+            await files.DownloadAsync(e.id, tmp);
+            return await File.ReadAllTextAsync(tmp);
+        }
+
+        var resolveCfgPath = Path.Combine(work, "client-resolve.json");
+        var resolveCfg = ClientConfig.Load(resolveCfgPath);
+        resolveCfg.BaseUrl = baseUrl;
+        resolveCfg.SyncRoot = root;
+        resolveCfg.SpaceId = space.id;
+        resolveCfg.Onboarded = true;
+        resolveCfg.Save();
+        await using var rh = new SyncHost(ClientConfig.Load(resolveCfgPath), BuildTokenSession(), api,
+            statePath: Path.Combine(work, "state-resolve.db"), watchLocal: false);
+        await rh.StartAsync();
+
+        // ① 以本地为准:把本地那一版原地覆盖到远端(同一 file_id),副本合并删除
+        var (rel1, copy1) = await MakeConflictAsync(rh, $"{prefix}-local.txt", "local-A", "remote-A");
+        Check("⑭ 前提:产生了冲突且本地那一版被保留成副本", copy1.Length > 0,
+            copy1.Length > 0 ? Path.GetFileName(copy1) : "没有副本");
+        Check("⑭ 前提:该路径被引擎识别为「可解决」", rh.CanResolveConflict(rel1));
+        var idBeforeLocal = (await files.FindByNameAsync(space.id, null, rel1))?.id;
+        Check("⑭ 「以本地为准」返回成功", await rh.ResolveConflictAsync(rel1, ConflictResolution.KeepLocal));
+        var afterLocal = await files.FindByNameAsync(space.id, null, rel1);
+        Check("⑭ 「以本地为准」后远端仍是同一个 file id(原地覆盖,不是新建)",
+            afterLocal is not null && afterLocal.id == idBeforeLocal,
+            $"before={idBeforeLocal} after={afterLocal?.id}");
+        var serverText1 = await ServerTextAsync(rel1);
+        Check("⑭ 「以本地为准」后远端内容 = 本地那一版",
+            serverText1.StartsWith("local-A-edited", StringComparison.Ordinal), serverText1);
+        Check("⑭ 「以本地为准」后本地副本已合并删除", !File.Exists(copy1));
+        Check("⑭ 「以本地为准」后不再是冲突态",
+            rh.Status.FirstOrDefault(s => s.RelativePath == rel1)?.State != SyncState.Conflict);
+
+        // ② 以远端为准:远端那一版留在原路径,本地改动(副本)被删除 —— 用户明确选的"放弃本地"
+        var (rel2, copy2) = await MakeConflictAsync(rh, $"{prefix}-remote.txt", "local-B", "remote-B");
+        Check("⑭ 前提(远端为准):产生了冲突且本地那一版被保留成副本", copy2.Length > 0);
+        Check("⑭ 「以远端为准」返回成功", await rh.ResolveConflictAsync(rel2, ConflictResolution.KeepRemote));
+        var localText2 = await File.ReadAllTextAsync(Path.Combine(root, rel2));
+        Check("⑭ 「以远端为准」后本地文件 = 远端那一版", localText2 == "remote-B", localText2);
+        Check("⑭ 「以远端为准」后本地副本已删除(本地改动被放弃)", !File.Exists(copy2));
+
+        // ③ 都保留:副本留着并作为**新文件**上传(两份都在)
+        var (rel3, copy3) = await MakeConflictAsync(rh, $"{prefix}-both.txt", "local-C", "remote-C");
+        Check("⑭ 前提(都保留):产生了冲突且本地那一版被保留成副本", copy3.Length > 0);
+        Check("⑭ 「都保留」返回成功", await rh.ResolveConflictAsync(rel3, ConflictResolution.KeepBoth));
+        Check("⑭ 「都保留」后本地副本仍在(数据不丢)", File.Exists(copy3));
+        Check("⑭ 「都保留」后副本被当成新文件传到了远端",
+            await files.FindByNameAsync(space.id, null, Path.GetFileName(copy3)) is not null,
+            Path.GetFileName(copy3));
+
+        // ④ 无人值守策略:配置里选 keep_local → 冲突发生时**不生成副本**,直接以本地覆盖远端
+        var policyCfgPath = Path.Combine(work, "client-policy.json");
+        var policyCfg = ClientConfig.Load(policyCfgPath);
+        policyCfg.BaseUrl = baseUrl;
+        policyCfg.SyncRoot = root;
+        policyCfg.SpaceId = space.id;
+        policyCfg.Onboarded = true;
+        policyCfg.OnConflict = "keep_local";
+        policyCfg.Save();
+        await using var ph = new SyncHost(ClientConfig.Load(policyCfgPath), BuildTokenSession(), api,
+            statePath: Path.Combine(work, "state-policy.db"), watchLocal: false);
+        await ph.StartAsync();
+        var rel4 = $"{prefix}-policy.txt";
+        var (_, copy4) = await MakeConflictAsync(ph, rel4, "local-D", "remote-D");
+        Check("⑭ 策略 keep_local:冲突时**不**生成副本(用户已预先决定)", copy4.Length == 0,
+            copy4.Length > 0 ? Path.GetFileName(copy4) : "");
+        var serverText4 = await ServerTextAsync(rel4);
+        Check("⑭ 策略 keep_local:远端被本地那一版覆盖",
+            serverText4.StartsWith("local-D-edited", StringComparison.Ordinal), serverText4);
+
+        // ⑤ 解决不了的情形要**如实说**(不能显示成"已解决")
+        Check("⑭ 没有任何副本记录的路径:CanResolveConflict = false",
+            !rh.CanResolveConflict($"{prefix}-never-conflicted.txt"));
+    }
 }
 finally
 {
