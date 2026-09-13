@@ -8,24 +8,180 @@
 // 实际每个请求都 401"的状态。
 
 using System.Windows;
+using Microsoft.Win32;
 using NetDisk.App.Views;
 using NetDisk.SyncEngine;
 using NetDisk.SyncEngine.Host;
 using NetDisk.SyncEngine.Notify;
+using NetDisk.SyncEngine.Update;
 
 namespace NetDisk.App;
 
 public partial class MainWindow : Window
 {
     private readonly NotificationCenter _notifications;
+    private readonly Notify.TrayNotifier? _tray;
     private SyncRuntime? _runtime;
     private bool _conflictNotified;
+    /// <summary>用户**真的要退出**(托盘菜单"退出"),而不是"关窗口 = 关到托盘"。</summary>
+    private bool _exitRequested;
 
-    public MainWindow(NotificationCenter notifications)
+    public MainWindow(NotificationCenter notifications, Notify.TrayNotifier? tray = null)
     {
         _notifications = notifications;
+        _tray = tray;
         InitializeComponent();
         Loaded += OnLoaded;
+        VersionText.Text = $"版本 {typeof(MainWindow).Assembly.GetName().Version}";
+        WireTray();
+    }
+
+    /// <summary>
+    /// 托盘的每个动作都转成主窗口上的一次调用。
+    ///
+    /// 为什么托盘事件由主窗口处理而不是直接在 TrayNotifier 里做:那些动作(立即同步/暂停/退出)
+    /// 需要运行时与视图的状态;托盘只该负责"用户点了什么",不该知道"同步是怎么跑的"。
+    /// </summary>
+    private void WireTray()
+    {
+        if (_tray is null)
+        {
+            return;
+        }
+        _tray.ShowRequested += RestoreFromTray;
+        _tray.SyncNowRequested += async () =>
+        {
+            RestoreFromTray();
+            if (_runtime is not null)
+            {
+                await _runtime.ReconcileAsync();
+            }
+        };
+        _tray.TogglePauseRequested += async pause =>
+        {
+            if (_runtime is null)
+            {
+                return;
+            }
+            if (pause)
+            {
+                await _runtime.Host.PauseAsync();
+            }
+            else
+            {
+                await _runtime.Host.ResumeAsync();
+            }
+            _tray.SetPaused(_runtime.Host.IsPaused);
+        };
+        _tray.OpenFolderRequested += () => Sync.OpenSyncFolder();
+        _tray.OpenLogRequested += OpenLog;
+        _tray.ExitRequested += ExitApplication;
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void OpenLog() => Sync.OpenLogFile();
+
+    /// <summary>真正退出:先让运行时收尾(OnClosed 里 Dispose),再关窗口结束进程。</summary>
+    private void ExitApplication()
+    {
+        _exitRequested = true;
+        Close();
+    }
+
+    /// <summary>
+    /// **关闭到托盘**(而不是退出)。
+    ///
+    /// 为什么这是默认行为:客户端的主职责是**持续同步**,而用户点窗口右上角的 × 时的意图
+    /// 绝大多数是"别挡着我做事",不是"停止同步"。直接退出会让同步悄悄停掉(用户以为还开着),
+    /// 而托盘图标仍在 —— 那才是最糟的组合。真正退出走托盘菜单的"退出"。
+    /// </summary>
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        if (!_exitRequested)
+        {
+            e.Cancel = true;
+            Hide();
+            AppLog.Write("app", "关闭到托盘:窗口已隐藏,同步继续运行(退出请用托盘菜单「退出」)");
+            if (!_trayHintShown)
+            {
+                _trayHintShown = true;
+                _notifications.NotifyInfo("NetDisk 仍在后台同步",
+                    "窗口已隐藏到托盘;要完全退出请右键托盘图标选「退出」。");
+            }
+            return;
+        }
+        base.OnClosing(e);
+    }
+
+    private bool _trayHintShown;
+
+    /// <summary>
+    /// 「检查更新」:让用户选一个**新版本安装包**,然后按契约顺序升级。
+    ///
+    /// 三条纪律:
+    ///   ① **必须先让用户确认**:升级会把客户端关掉再装(期间同步暂停),这是一次有感的操作;
+    ///   ② 升级序列交给引擎(`UpdateOrchestrator`):暂停 → 排空 → 迁移 → 启动更新器,
+    ///      失败路径会**恢复同步**并把原因返回,界面如实显示;
+    ///   ③ 更新器拉起来之后**立刻退出**:msiexec 要替换安装目录里的 exe,而我们正锁着它。
+    /// </summary>
+    private async void OnCheckUpdate(object sender, RoutedEventArgs e)
+    {
+        if (_runtime is null)
+        {
+            UpdateStatusText.Text = "同步还没启动,先登录再升级。";
+            return;
+        }
+        // 限定名是必须的:本工程同时开了 UseWPF 与 UseWindowsForms(托盘),两边都有 OpenFileDialog/MessageBox/Application
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择 NetDisk 新版本安装包(.msi)",
+            Filter = "Windows 安装包 (*.msi)|*.msi",
+            CheckFileExists = true,
+        };
+        if (dlg.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        var host = new SyncHostUpdateHost(_runtime, dlg.FileName);
+        var plan = host.DescribePlan();
+        var go = System.Windows.MessageBox.Show(this, plan + "\r\n\r\n现在开始升级?", "检查更新",
+            MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (go != MessageBoxResult.OK)
+        {
+            UpdateStatusText.Text = "已取消(没有做任何改动)。";
+            return;
+        }
+
+        UpdateStatusText.Text = "正在升级(暂停同步 → 等传输跑完 → 迁移状态库 → 启动更新器)…";
+        var exited = false;
+        host.UpdaterLaunched += () =>
+        {
+            // 更新器已在独立进程里:我们必须**立刻让路**,否则安装器替换不了 exe
+            exited = true;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                AppLog.Write("app", "更新器已启动,客户端退出以完成升级(安装完成后会自动重启)");
+                _exitRequested = true;
+                System.Windows.Application.Current.Shutdown();
+            }));
+        };
+
+        var outcome = await new UpdateOrchestrator(host).RunAsync();
+        if (exited)
+        {
+            return; // 进程正在退出,不再更新界面
+        }
+        UpdateStatusText.Text = outcome.Upgraded
+            ? "升级已启动:" + outcome.Reason
+            : $"这次没有升级成功({outcome.Reason});同步已恢复。";
+        AppLog.Write("update", $"升级结果:{outcome.Reason}(失败于={outcome.FailedAt?.ToString() ?? "无"} 已恢复同步={outcome.SyncResumed})");
     }
 
     /// <summary>当前跑着的运行时(诊断用;没有则为 null)。</summary>

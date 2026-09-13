@@ -26,10 +26,20 @@
       <TabItem Header="关于">
         <StackPanel Margin="16">
           <TextBlock FontSize="18" FontWeight="SemiBold" Text="NetDisk 桌面端" />
+          <TextBlock x:Name="VersionText" Margin="0,8,0,0" Foreground="#666" />
           <TextBlock Margin="0,8,0,0" TextWrapping="Wrap"
                      Text="本机与服务器双向同步:本地改动自动上传,服务器改动自动下载,两端同时改动时保留冲突副本。" />
           <TextBlock Margin="0,8,0,0" Foreground="#666" TextWrapping="Wrap"
                      Text="平台无关逻辑在 NetDisk.ClientCore / SyncEngine / Transport;本窗口只做渲染与动作转发。" />
+
+          <!-- 自动更新入口:选一个**新版本安装包**,按"暂停同步 → 排空 → 迁移 → 启动更新器"升级。
+               为什么让用户选包而不是自动下载:契约里没有"更新清单/下载"端点(只有 /version),
+               假装能自动下载等于给一个永远失败的按钮。 -->
+          <Button x:Name="CheckUpdateButton" Margin="0,16,0,0" Padding="16,6" HorizontalAlignment="Left"
+                  Content="检查更新(选择新版本安装包…)" Click="OnCheckUpdate" />
+          <TextBlock x:Name="UpdateStatusText" Margin="0,8,0,0" Foreground="#555" TextWrapping="Wrap" />
+          <TextBlock Margin="0,6,0,0" Foreground="#888" TextWrapping="Wrap"
+                     Text="升级会:暂停同步 → 等正在传的文件传完 → 迁移本地状态库 → 安装新版本 → 自动重启客户端。本地文件与配置不会被删除。" />
         </StackPanel>
       </TabItem>
     </TabControl>

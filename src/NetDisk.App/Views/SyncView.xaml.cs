@@ -86,7 +86,10 @@ public partial class SyncView : System.Windows.Controls.UserControl
             : $"日志已关闭(此前记录在 {AppLog.DefaultPath()};重新勾选即继续)";
     }
 
-    private void OnOpenLog(object sender, RoutedEventArgs e)
+    private void OnOpenLog(object sender, RoutedEventArgs e) => OpenLogFile();
+
+    /// <summary>用记事本打开客户端日志(界面按钮与托盘菜单共用)。</summary>
+    public void OpenLogFile()
     {
         var path = AppLog.DefaultPath();
         try
@@ -299,7 +302,10 @@ public partial class SyncView : System.Windows.Controls.UserControl
         }
     }
 
-    private void OnOpenFolder(object sender, RoutedEventArgs e)
+    private void OnOpenFolder(object sender, RoutedEventArgs e) => OpenSyncFolder();
+
+    /// <summary>打开同步目录(界面按钮与**托盘菜单**共用同一份实现:两处各写一遍必然漂移)。</summary>
+    public void OpenSyncFolder()
     {
         var root = _runtime?.Config.SyncRoot;
         if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))

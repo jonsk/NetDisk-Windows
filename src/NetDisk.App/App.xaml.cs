@@ -85,7 +85,7 @@ public partial class App : System.Windows.Application
 
         // 主窗口在 App 里建(而不是 StartupUri),因为托盘/通知必须先于窗口存在:
         // 否则登录成功后引擎一冲突就没人接住那条通知(用户什么都看不到)。
-        _main = new MainWindow(_notifications);
+        _main = new MainWindow(_notifications, _tray);
         MainWindow = _main;
         _main.Show();
     }

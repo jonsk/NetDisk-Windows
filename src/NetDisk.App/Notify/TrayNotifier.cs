@@ -47,8 +47,69 @@ public sealed class TrayNotifier : IDisposable
             Visible = true,
             Text = tooltip.Length > 63 ? tooltip[..63] : tooltip, // NotifyIcon.Text 上限 63 字符
         };
+        BuildContextMenu();
+        // 双击图标 = 打开主界面(用户对托盘图标的默认期待;没有它,窗口隐藏后就"找不回来"了)
+        _icon.DoubleClick += (_, _) => ShowRequested?.Invoke();
         _center.Raised += OnNotification;
     }
+
+    // ---------------------------------------------------------------- 右键菜单
+
+    private ToolStripMenuItem _pauseItem = null!;
+
+    /// <summary>用户要求打开主界面(双击图标或菜单)。</summary>
+    public event Action? ShowRequested;
+
+    /// <summary>用户要求立即同步。</summary>
+    public event Action? SyncNowRequested;
+
+    /// <summary>用户要求暂停/继续同步(参数 = 目标状态:true = 暂停)。</summary>
+    public event Action<bool>? TogglePauseRequested;
+
+    /// <summary>用户要求打开同步目录。</summary>
+    public event Action? OpenFolderRequested;
+
+    /// <summary>用户要求打开日志文件。</summary>
+    public event Action? OpenLogRequested;
+
+    /// <summary>用户要求**真正退出**(不是关到托盘)。</summary>
+    public event Action? ExitRequested;
+
+    /// <summary>
+    /// 建右键菜单。为什么必须有:窗口"关闭到托盘"之后,托盘是用户唯一的入口 ——
+    /// 没有菜单就只能双击,而"怎么退出"会变成猜谜(用户会去任务管理器杀进程,
+    /// 那会让同步半途中断)。
+    /// </summary>
+    private void BuildContextMenu()
+    {
+        var menu = new ContextMenuStrip();
+        menu.Items.Add(new ToolStripMenuItem("打开主界面", null, (_, _) => ShowRequested?.Invoke()));
+        menu.Items.Add(new ToolStripMenuItem("立即同步", null, (_, _) => SyncNowRequested?.Invoke()));
+        _pauseItem = new ToolStripMenuItem("暂停同步", null,
+            (_, _) => TogglePauseRequested?.Invoke(!_paused));
+        menu.Items.Add(_pauseItem);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("打开同步目录", null, (_, _) => OpenFolderRequested?.Invoke()));
+        menu.Items.Add(new ToolStripMenuItem("打开日志", null, (_, _) => OpenLogRequested?.Invoke()));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("退出", null, (_, _) => ExitRequested?.Invoke()));
+        _icon.ContextMenuStrip = menu;
+    }
+
+    private bool _paused;
+
+    /// <summary>同步当前是否是暂停态(菜单文字据此显示"暂停同步/继续同步")。</summary>
+    public void SetPaused(bool paused)
+    {
+        _paused = paused;
+        if (_pauseItem is not null)
+        {
+            _pauseItem.Text = paused ? "继续同步" : "暂停同步";
+        }
+    }
+
+    /// <summary>菜单项文字(供检查器/诊断读取;菜单本身是 UI 对象,不该被测试直接摸)。</summary>
+    public string PauseItemText => _pauseItem?.Text ?? "";
 
     /// <summary>已经显示过的气泡条数(诊断/检查用)。</summary>
     public int ShownCount { get; private set; }

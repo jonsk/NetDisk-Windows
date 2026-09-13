@@ -24,14 +24,19 @@ public sealed record UpdaterCommand(
     string MsiPath,
     string ClientExePath,
     bool Silent = true,
-    bool RelaunchClient = true)
+    bool RelaunchClient = true,
+    /// <summary>旧安装包(可选):新版验活失败时用它装回去。空 = 明确"没有回滚退路"。</summary>
+    string? PreviousMsiPath = null)
 {
     /// <summary>拼出更新器的命令行(引号与开关都在这里统一,免得各处各拼一份)。</summary>
     public string ToArguments()
     {
         var silent = Silent ? " /qn" : " /qb";
         var relaunch = RelaunchClient ? " --relaunch" : "";
-        return $"--msi \"{MsiPath}\"{silent} --client \"{ClientExePath}\"{relaunch}";
+        var previous = string.IsNullOrWhiteSpace(PreviousMsiPath)
+            ? ""
+            : $" --previous-msi \"{PreviousMsiPath}\"";
+        return $"--msi \"{MsiPath}\"{silent} --client \"{ClientExePath}\"{relaunch}{previous}";
     }
 
     public override string ToString() => "\"" + UpdaterPath + "\" " + ToArguments();
@@ -52,13 +57,16 @@ public sealed class UpdaterLauncher
     }
 
     /// <summary>构造更新器命令(纯函数,可断言)。</summary>
-    public UpdaterCommand BuildCommand(string msiPath, string clientExePath, bool silent = true, bool relaunch = true)
+    public UpdaterCommand BuildCommand(
+        string msiPath, string clientExePath, bool silent = true, bool relaunch = true,
+        string? previousMsiPath = null)
     {
         if (string.IsNullOrWhiteSpace(msiPath))
         {
             throw new ArgumentException("MSI 路径不能为空", nameof(msiPath));
         }
-        return new UpdaterCommand(_updaterPath, msiPath.Trim(), clientExePath.Trim(), silent, relaunch);
+        return new UpdaterCommand(_updaterPath, msiPath.Trim(), clientExePath.Trim(), silent, relaunch,
+            string.IsNullOrWhiteSpace(previousMsiPath) ? null : previousMsiPath.Trim());
     }
 
     /// <summary>

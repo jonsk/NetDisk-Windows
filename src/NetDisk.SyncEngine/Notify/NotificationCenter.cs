@@ -32,6 +32,9 @@ public enum NotificationKind
 
     /// <summary>配额预警。</summary>
     QuotaWarning,
+
+    /// <summary>通用信息(调用方明确要告诉用户一件事,例如"关闭到托盘后仍在同步")。</summary>
+    Info,
 }
 
 /// <summary>一条通知。</summary>
@@ -153,6 +156,13 @@ public sealed class NotificationCenter
             _quotaWarned[spaceId] = false;
         }
     }
+
+    /// <summary>
+    /// 一条**通用信息**通知。与其它通知不同,它不做合并、不做阈值判断 ——
+    /// 调用方(界面)是明确要告诉用户一件事的,被策略悄悄吞掉才是错的。
+    /// </summary>
+    public void NotifyInfo(string title, string message) =>
+        Raise(new AppNotification(NotificationKind.Info, title, message));
 
     private void Raise(AppNotification n) => Raised?.Invoke(n);
 

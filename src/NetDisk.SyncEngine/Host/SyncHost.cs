@@ -255,6 +255,29 @@ public sealed class SyncHost : IAsyncDisposable
         Notice?.Invoke("同步已恢复");
     }
 
+    /// <summary>
+    /// **等在飞的传输跑完**(返回 true = 已排空;false = 超时)。
+    ///
+    /// 为什么要单独暴露它:自动更新必须在"迁移状态库 + 换 exe"之前确认没有传输在飞 ——
+    /// 硬杀掉一个正在上传的任务会留下半截暂存文件与"已预留但没结算"的配额(服务端要等回收班车)。
+    /// 语义是**等**而不是清:`UpdateOrchestrator` 拿到 false 时**放弃本次升级**(而不是杀任务)。
+    /// </summary>
+    public async Task<bool> DrainTransfersAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        try
+        {
+            await _queue.DrainAsync(cts.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            Notice?.Invoke($"排空传输超时(待处理={_queue.PendingCount} 在跑={_queue.ActiveCount})");
+            return false;
+        }
+    }
+
     private void StartLoops()
     {
         if (_watcher is not null && !_loopsStarted)
