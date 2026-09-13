@@ -106,7 +106,10 @@ public sealed class SyncHost : IAsyncDisposable
         var resolvedState = statePath ?? ClientPaths.StatePath;
         _store = StateStore.Open(resolvedState);
         _ledger = new ExpectedChangeLedger(clock: _clock, sink: new SqliteExpectedChangeSink(_store));
-        _queue = new TransferQueue(clock: _clock);
+        // 传输参数从**配置**来(并发/限速):配置文件里写了这些键,就必须真的生效 ——
+        // 否则那份带 `_说明` 的配置在骗用户("我改了限速却没变化"是最难查的一类问题)。
+        QueueOptions = BuildQueueOptions(_config);
+        _queue = new TransferQueue(QueueOptions, _clock);
         if (watchLocal && !string.IsNullOrWhiteSpace(_config.SyncRoot))
         {
             _watcher = new FileWatcher(new FileSystemWatcherBackend(_config.SyncRoot), _clock);
@@ -117,6 +120,42 @@ public sealed class SyncHost : IAsyncDisposable
     public IReadOnlyList<SyncEntryStatus> Status
     {
         get { lock (_gate) { return _status.ToArray(); } }
+    }
+
+    /// <summary>本会话生效的传输参数(并发/限速;界面显示与检查器断言用)。</summary>
+    public TransferQueueOptions QueueOptions { get; }
+
+    /// <summary>
+    /// 把配置折算成传输参数(公开:检查器要能**不启动同步**就断言这条映射 ——
+    /// "配置写了却不生效"属于最难查的一类问题,必须有本地断言钉住)。
+    ///
+    /// 三处夹紧都必要:
+    ///   · 并发夹到 1..16:0/负数会让队列**永不执行**(配置手改坏了不该表现为"同步没反应"),
+    ///     上限 16 是"别把用户机器和带宽打满"的经验值;
+    ///   · 限速的 KB/s → B/s(配置里用 KB/s 是为了让用户填得直观);
+    ///   · 负数一律当 0(不限速),不让一个笔误变成"永远在等令牌"。
+    /// </summary>
+    public static TransferQueueOptions BuildQueueOptions(ClientConfig cfg)
+    {
+        var concurrency = cfg.MaxConcurrency;
+        if (concurrency < 1)
+        {
+            concurrency = 3;
+        }
+        if (concurrency > 16)
+        {
+            concurrency = 16;
+        }
+        static long ToBytesPerSecond(int kbps) => kbps > 0 ? kbps * 1024L : 0L;
+        return new TransferQueueOptions
+        {
+            MaxConcurrency = concurrency,
+            RateLimit = new RateLimitOptions
+            {
+                UploadBytesPerSecond = ToBytesPerSecond(cfg.UploadKbps),
+                DownloadBytesPerSecond = ToBytesPerSecond(cfg.DownloadKbps),
+            },
+        };
     }
 
     public bool IsRunning => _running;

@@ -12,6 +12,7 @@ using System.Diagnostics;
 using NetDisk.ClientCore;
 using NetDisk.SyncEngine;
 using NetDisk.SyncEngine.Sync;
+using NetDisk.SyncEngine.Host;
 using NetDisk.SyncEngine.Transfer;
 
 // 看门狗:某些实现缺陷的表现是**用例挂住**(例如限速器陷在"睡一秒还是不够"的循环里)。
@@ -45,6 +46,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑪ 跨重启销账:重启后仍能认出自写事件", CheckLedgerSurvivesRestartAsync),
     ("⑫ 第一批跑完后再入队仍会被执行(worker 活性)", CheckEnqueueAfterDrainStillRunsAsync),
     ("⑬ 账本对没登记过的路径不抛异常(曾经 NRE)", CheckLedgerUnknownPathAsync),
+    ("⑭ 配置里的并发/限速真的生效(不是死配置)", CheckConfigDrivesTransferOptionsAsync),
 };
 
 var failed = 0;
@@ -478,6 +480,45 @@ static Task CheckLedgerUnknownPathAsync()
         Assert(ledger.TryConsume(@"C:\sync\stale.txt", 5, ticks) == ExpectedChangeVerdict.NotOurs,
             "过期条目必须失效(否则用户稍后的真实修改会被吞掉)");
     });
+    return Task.CompletedTask;
+}
+
+// 配置里的并发/限速必须**真的进到传输队列**。
+//
+// 为什么单独立一条:配置文件里写着 max_concurrency/upload_kbps/download_kbps,还配了中文说明,
+// 如果没有任何代码消费它们,那就是**配置文件在骗用户**("我改了限速却没变化"是最难查的一类问题)。
+// 这条断言不启动同步、不连服务端,只钉住"配置 → 传输参数"的映射与夹紧规则。
+static Task CheckConfigDrivesTransferOptionsAsync()
+{
+    // ① 正常值:并发 5、上行 128KB/s、下行 256KB/s
+    var cfg = ClientConfig.Load(System.IO.Path.Combine(
+        System.IO.Path.GetTempPath(), "netdisk-transfer-check", "absent.json"));
+    cfg.MaxConcurrency = 5;
+    cfg.UploadKbps = 128;
+    cfg.DownloadKbps = 256;
+    var opt = SyncHost.BuildQueueOptions(cfg);
+    Assert(opt.MaxConcurrency == 5, $"并发应取配置值 5,实际 {opt.MaxConcurrency}");
+    Assert(opt.RateLimit.UploadBytesPerSecond == 128 * 1024,
+        $"上行限速应换算成字节/秒,实际 {opt.RateLimit.UploadBytesPerSecond}");
+    Assert(opt.RateLimit.DownloadBytesPerSecond == 256 * 1024,
+        $"下行限速应换算成字节/秒,实际 {opt.RateLimit.DownloadBytesPerSecond}");
+
+    // ② 夹紧:0/负数不能让队列"永不执行",过大不能把机器打满
+    cfg.MaxConcurrency = 0;
+    Assert(SyncHost.BuildQueueOptions(cfg).MaxConcurrency == 3,
+        "并发 0 必须回落到默认 3(否则队列静默不执行任何任务)");
+    cfg.MaxConcurrency = 99;
+    Assert(SyncHost.BuildQueueOptions(cfg).MaxConcurrency == 16,
+        "并发上限必须夹到 16(不能把用户机器与带宽打满)");
+    cfg.UploadKbps = -5;
+    cfg.DownloadKbps = -1;
+    var opt2 = SyncHost.BuildQueueOptions(cfg);
+    Assert(opt2.RateLimit.UploadBytesPerSecond == 0 && opt2.RateLimit.DownloadBytesPerSecond == 0,
+        "负的限速必须当成不限速(而不是'永远在等令牌')");
+
+    // ③ 0 = 不限速(与 RateLimiter 的语义一致)
+    cfg.UploadKbps = 0;
+    Assert(SyncHost.BuildQueueOptions(cfg).RateLimit.UploadBytesPerSecond == 0, "0 应表示不限速");
     return Task.CompletedTask;
 }
 
