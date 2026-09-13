@@ -190,6 +190,43 @@ public partial class SyncView : System.Windows.Controls.UserControl
         _ => state.ToString(),
     };
 
+    private async void OnTogglePause(object sender, RoutedEventArgs e)
+    {
+        if (_runtime is null)
+        {
+            return;
+        }
+        PauseButton.IsEnabled = false;
+        try
+        {
+            if (_runtime.Host.IsPaused)
+            {
+                await _runtime.Host.ResumeAsync();
+                PauseButton.Content = "暂停同步";
+                NoticeText.Text = "已恢复同步";
+            }
+            else
+            {
+                await _runtime.Host.PauseAsync();
+                PauseButton.Content = "继续同步";
+                // 暂停后不会再有 StatusChanged 事件,所以在这里明确写一次界面状态,
+                // 否则用户看到的是"最后一轮的旧状态" + 一个变成"继续同步"的按钮(自相矛盾)。
+                SummaryText.Text = "已暂停:不再对账与传输(数据未改动)。点「继续同步」恢复。";
+                NoticeText.Text = "已暂停";
+            }
+            AppLog.Write("app", PauseButton.Content?.ToString() == "继续同步" ? "用户暂停了同步" : "用户恢复了同步");
+        }
+        catch (Exception ex)
+        {
+            NoticeText.Text = "暂停/恢复失败: " + ex.Message;
+            AppLog.Write("app", $"暂停/恢复失败: {ex}");
+        }
+        finally
+        {
+            PauseButton.IsEnabled = true;
+        }
+    }
+
     private async void OnSyncNow(object sender, RoutedEventArgs e)
     {
         if (_runtime is null)

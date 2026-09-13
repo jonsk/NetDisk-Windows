@@ -505,6 +505,55 @@ try
                 remaining == 0, $"远端还剩 {remaining}/{massCount}");
         }
     }
+
+    // ------------------------------------------------ ⑨ 暂停 / 继续同步
+    // 暂停的语义必须**可判定**,否则界面上的按钮只是装饰:
+    //   · 暂停中:不再对账(连"立即同步"也跳过)、不再上传/下载新文件;
+    //   · 恢复后:暂停期间攒下的改动要**自动补上**(靠恢复时的一次全量对账);
+    //   · 全程不动数据(不删、不回滚、不清理状态库)。
+    Console.WriteLine();
+    Console.WriteLine("— ⑨ 暂停 / 继续同步");
+    {
+        var pausedName = $"sync-check-{DateTime.Now:HHmmss}-paused.txt";
+        await using var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false);
+        await host.StartAsync();
+        await host.ReconcileAsync();
+        Check("⑨ 初始为运行态", !host.IsPaused && host.IsRunning);
+
+        await host.PauseAsync();
+        Check("⑨ 暂停后 IsPaused=true 且 IsRunning=false", host.IsPaused && !host.IsRunning);
+
+        // 暂停期间放一个新文件:对账被跳过 → 服务端不该出现它
+        await File.WriteAllTextAsync(Path.Combine(root, pausedName), "created-while-paused");
+        // 这一条**专门钉住"对账护栏"这一层**:暂停其实有两层保护(对账护栏 + 队列会话取消),
+        // 只断言"文件没传上去"是不够的 —— 实测拆掉护栏后断言**照样通过**(队列那层挡住了),
+        // 也就是说那条断言测不出护栏在不在。所以这里断言"护栏确实发了跳过通知"。
+        var sawPauseSkip = false;
+        void OnPauseNotice(string m)
+        {
+            if (m.Contains("已暂停", StringComparison.Ordinal))
+            {
+                sawPauseSkip = true;
+            }
+        }
+        host.Notice += OnPauseNotice;
+        await host.ReconcileAsync(); // 显式调用也必须被跳过
+        host.Notice -= OnPauseNotice;
+        Check("⑨ 暂停期间的对账护栏确实生效(明确报「已暂停…跳过」)", sawPauseSkip,
+            sawPauseSkip ? "" : "没看到跳过通知 —— 护栏可能被拆掉,只是被队列那层掩盖了");
+        var appeared = await files.FindByNameAsync(space.id, null, pausedName);
+        Check("⑨ 暂停期间新文件不会被上传(手动对账也被跳过)", appeared is null,
+            appeared is null ? "" : "暂停期间仍然传上去了");
+
+        // 恢复:应当自动把暂停期间的新文件补传上去
+        await host.ResumeAsync();
+        Check("⑨ 恢复后 IsPaused=false 且 IsRunning=true", !host.IsPaused && host.IsRunning);
+        var afterResume = await files.FindByNameAsync(space.id, null, pausedName);
+        Check("⑨ 恢复后暂停期间的改动被自动补上(新文件已上传)", afterResume is not null,
+            afterResume is null ? "恢复后仍未上传" : "");
+        Check("⑨ 暂停/恢复不动数据(本地文件仍在)",
+            File.Exists(Path.Combine(root, pausedName)));
+    }
 }
 finally
 {

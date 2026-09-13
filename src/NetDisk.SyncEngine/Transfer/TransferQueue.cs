@@ -69,6 +69,9 @@ public sealed class TransferQueue : IAsyncDisposable
     private readonly ConcurrentDictionary<string, long> _done = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _slots;
     private readonly CancellationTokenSource _shutdown = new();
+    // **会话级取消**(暂停/恢复):与 _shutdown 分开,因为"暂停"之后还要能继续用同一个队列。
+    // 取消它 → 在跑的任务以取消收尾、工作线程退出;恢复时换一个新的,下次入队自会拉起新线程。
+    private CancellationTokenSource _session = new();
     private readonly List<Task> _workers = new();
     private int _active;
     // 存活工作线程数:**必须在工作线程退出时递减**,否则 _workers 里堆的是"已经死了的任务",
@@ -104,6 +107,42 @@ public sealed class TransferQueue : IAsyncDisposable
     /// <summary>队列里还有多少待处理。</summary>
     public int PendingCount => _pending.Count;
 
+    /// <summary>当前会话的取消令牌(暂停后换新,所以每次用都要现取)。</summary>
+    private CancellationToken JobToken() => _session.Token;
+
+    /// <summary>
+    /// **取消当前会话的任务**(暂停用):在跑的任务立刻以取消收尾,待处理的任务留在队列里
+    /// (恢复后继续)。为什么不留着让它们跑完:用户按"暂停"往往正因为"现在别传了"
+    /// (开会/切移动网络),让几 GB 继续偷偷传完与按钮上的字不符。
+    /// 半截数据不会留下:下载是"先写 .part 再原子改名",上传由服务端任务担责(可续传/可回收)。
+    /// </summary>
+    public void CancelActive()
+    {
+        try
+        {
+            _session.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 已恢复/已释放:忽略
+        }
+    }
+
+    /// <summary>**恢复会话**:换一个新的取消令牌,下次入队会拉起新的工作线程。</summary>
+    public void ResumeSession()
+    {
+        var old = _session;
+        _session = new CancellationTokenSource();
+        try
+        {
+            old.Dispose();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 忽略
+        }
+    }
+
     /// <summary>入队(不阻塞;由工作线程取走)。</summary>
     public void Enqueue(TransferJob job)
     {
@@ -134,7 +173,7 @@ public sealed class TransferQueue : IAsyncDisposable
                 Interlocked.Increment(ref _liveWorkers);
                 // Task.Run:工作线程跑在线程池上 —— 即使 UI 线程被挂起/最小化,
                 // 传输也照常推进(验收"最小化后继续传")
-                _workers.Add(Task.Run(() => WorkerLoopAsync(_shutdown.Token)));
+                _workers.Add(Task.Run(() => WorkerLoopAsync(JobToken())));
             }
         }
     }
@@ -228,6 +267,7 @@ public sealed class TransferQueue : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _shutdown.Cancel();
+        _session.Cancel(); // 关闭时两条都要取消:工作线程可能在等会话令牌
         List<Task> workers;
         lock (_workers)
         {
@@ -243,6 +283,7 @@ public sealed class TransferQueue : IAsyncDisposable
         }
         _slots.Dispose();
         _shutdown.Dispose();
+        _session.Dispose();
     }
 }
 

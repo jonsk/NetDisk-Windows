@@ -76,6 +76,10 @@ public sealed class SyncHost : IAsyncDisposable
     private Task? _localLoop;
     private Task? _remoteLoop;
     private volatile bool _running;
+    /// <summary>暂停中(界面按了"暂停")。对账/监听/事件流/传输都停下,数据不动。</summary>
+    private volatile bool _paused;
+    /// <summary>监听与事件流是否已接上(暂停时置 false;恢复时重新接上并全量对账补漏)。</summary>
+    private bool _loopsStarted;
 
     /// <summary>状态变化(后台线程触发;App 必须 marshal 回 UI 线程)。</summary>
     public event Action<IReadOnlyList<SyncEntryStatus>>? StatusChanged;
@@ -160,6 +164,9 @@ public sealed class SyncHost : IAsyncDisposable
 
     public bool IsRunning => _running;
 
+    /// <summary>是否处于暂停状态(界面按钮/状态文字用)。</summary>
+    public bool IsPaused => _paused;
+
     /// <summary>
     /// 启动:对账一次 → 开监听与远端事件循环。
     /// 返回 false 表示**没登录**(由调用方弹登录页),不是错误。
@@ -170,7 +177,7 @@ public sealed class SyncHost : IAsyncDisposable
         {
             return true;
         }
-        if (!_config.IsUsable())
+        if (_config.IsUsable() is false)
         {
             Notice?.Invoke("未配置服务器地址或同步根");
             return false;
@@ -183,20 +190,104 @@ public sealed class SyncHost : IAsyncDisposable
         Directory.CreateDirectory(LongPath.ToExtended(_config.SyncRoot));
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _paused = false;
         await ReconcileAsync(_cts.Token).ConfigureAwait(false);
 
-        if (_watcher is not null)
+        StartLoops();
+        _running = true;
+        Notice?.Invoke("同步已启动");
+        return true;
+    }
+
+    /// <summary>
+    /// **暂停同步**(用户在界面上按"暂停")。
+    ///
+    /// 语义(写清楚,免得被理解成别的):
+    ///   · **停止产生新的传输**:不再对账(手动"立即同步"也会被忽略)、忽略本地监听事件、
+    ///     断开远端事件流,并**取消正在排队/在跑的任务**(见 TransferQueue.CancelActive);
+    ///   · **不动任何数据**:不删除、不回滚、不清理状态库 —— 恢复后接着干;
+    ///   · 状态列表保留最后一轮的结果(界面显示"已暂停")。
+    /// 为什么不"只停对账、让队列跑完":用户按暂停往往正因为"现在别传了"(开会/移动网络),
+    /// 让几 GB 继续悄悄传完与按钮上的字不符。
+    /// </summary>
+    public async Task PauseAsync()
+    {
+        if (!_running || _paused)
+        {
+            return;
+        }
+        _paused = true;
+        _running = false;
+        // 队列先停:它在飞的请求会以取消收尾(不落半截数据:下载是 .part 原子改名、上传由服务端任务担责)
+        _queue.CancelActive();
+        await StopLoopsAsync().ConfigureAwait(false);
+        Notice?.Invoke("同步已暂停(不再对账与传输;数据未改动)");
+    }
+
+    /// <summary>**继续同步**:重新对账一次并把监听/事件流接回去。</summary>
+    public async Task ResumeAsync(CancellationToken ct = default)
+    {
+        if (!_paused)
+        {
+            return;
+        }
+        _paused = false;
+        _queue.ResumeSession();
+        _cts?.Dispose();
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Notice?.Invoke("正在恢复同步…");
+        await ReconcileAsync(_cts.Token).ConfigureAwait(false);
+        StartLoops();
+        _running = true;
+        Notice?.Invoke("同步已恢复");
+    }
+
+    private void StartLoops()
+    {
+        if (_watcher is not null && !_loopsStarted)
         {
             _watcher.RescanRequested += OnRescanRequested;
             _watcher.Start();
         }
-        if (_sseFactory is not null)
+        if (_sseFactory is not null && _remoteLoop is null && _cts is not null)
         {
             _remoteLoop = Task.Run(() => RemoteLoopAsync(_cts.Token), _cts.Token);
         }
-        _running = true;
-        Notice?.Invoke("同步已启动");
-        return true;
+        _loopsStarted = true;
+    }
+
+    private async Task StopLoopsAsync()
+    {
+        if (_watcher is not null && _loopsStarted)
+        {
+            // 不复用/不销毁监听器:只**退订**。监听器本身还在跑(它的去抖队列里可能积着事件),
+            // 恢复时重新订阅并做一次**全量对账** —— 漏掉的事件由这一轮补齐,
+            // 所以"暂停期间的事件丢了"不会造成不一致(比给 watcher 加 Stop/Start 生命周期更不容易出错)。
+            _watcher.RescanRequested -= OnRescanRequested;
+            _watcher.Flush();
+        }
+        _loopsStarted = false;
+        var loop = _remoteLoop;
+        _remoteLoop = null;
+        if (_cts is not null)
+        {
+            await _cts.CancelAsync().ConfigureAwait(false);
+        }
+        if (loop is not null)
+        {
+            try
+            {
+                await loop.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // 暂停路径:取消是预期结果
+            }
+            catch (Exception ex)
+            {
+                Notice?.Invoke($"远端事件循环退出:{ex.Message}");
+            }
+        }
     }
 
     // ---------------------------------------------------------------- 对账
@@ -207,6 +298,13 @@ public sealed class SyncHost : IAsyncDisposable
     /// </summary>
     public async Task ReconcileAsync(CancellationToken ct = default)
     {
+        // 暂停中:连"立即同步"也不做 —— 按钮上的字是"暂停",那就什么都不该发生。
+        // (恢复时会做一次全量对账,暂停期间攒下的改动不会丢。)
+        if (_paused)
+        {
+            Notice?.Invoke("已暂停:本轮对账被跳过(点「继续同步」后会自动补上)");
+            return;
+        }
         // 已有对账在跑:记一个"待跑"标记后立刻返回(合并请求),由正在跑的那次收尾时再跑一遍。
         // 不这样做就会堆积 N 个并发对账 —— 它们互相踩状态库与队列。
         if (!await _reconcileGate.WaitAsync(0, ct).ConfigureAwait(false))
