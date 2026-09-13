@@ -73,6 +73,20 @@
       <TextBlock Margin="130,4,0,0" Foreground="#888" TextWrapping="Wrap"
                  Text="这是**无人值守**策略;无论选哪条,同步页里都能对某一次冲突单独改主意(先选中「冲突」行)。" />
 
+      <!-- 多空间:一个账号可以同时同步多个空间,每个空间一棵本地树。
+           为什么要有这个列表:配置里能写多个空间,但用户看不见也改不了 —— 而那才是"多空间"能不能用起来的关键。 -->
+      <TextBlock Margin="0,16,0,0" FontWeight="SemiBold" Text="同步的空间(每个空间一个本地目录)" />
+      <ListBox x:Name="SpaceList" Margin="0,6,0,0" Height="96" FontSize="13" />
+      <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+        <Button x:Name="AddSpaceButton" Padding="12,4" Content="添加空间…" Click="OnAddSpace" />
+        <Button x:Name="RemoveSpaceButton" Margin="8,0,0,0" Padding="12,4"
+                Content="移除选中绑定" Click="OnRemoveSpace" />
+        <TextBlock VerticalAlignment="Center" Margin="10,0,0,0" Foreground="#888"
+                   Text="（只解除绑定，不删除本地文件）" />
+      </StackPanel>
+      <TextBlock x:Name="SpaceHintText" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap"
+                 Text="改动空间后需要「保存并重启同步」生效；每个空间有自己的状态库（state-&lt;空间短码&gt;.db）。" />
+
       <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
         <Button x:Name="SaveButton" Padding="18,6" FontWeight="SemiBold"
                 Content="保存并重启同步" Click="OnSave" />

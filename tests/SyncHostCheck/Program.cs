@@ -1113,6 +1113,114 @@ try
         Check("⑮ 路径不存在时返回 null(而不是抛异常)",
             await browser.FindByPathAsync(new[] { $"{prefix}-does-not-exist", "同名.txt" }) is null);
     }
+
+    // ------------------------------------------------ ⑯ 多空间:一个账号、两个空间、两棵本地树
+    // 这是清单里的最后一项功能缺口。核心不是"能配两个空间",而是**互不串**:
+    // 每个空间一棵本地树、一个状态库、一个宿主;一个空间的增删改不该出现在另一个空间里。
+    Console.WriteLine();
+    Console.WriteLine("— ⑯ 多空间(个人空间 + 团队空间,两棵本地树)");
+    {
+        var prefix = $"sync-check-{DateTime.Now:HHmmss}-multi";
+        // ① 造一个真实的**团队空间**(契约 POST /api/v1/spaces;admin 账号有权限)
+        var collab = new SpaceCollabClient(api);
+        var team = await collab.CreateAsync($"{prefix}-team");
+        Check("⑯ 前提:团队空间已创建", !string.IsNullOrWhiteSpace(team.id), team.id);
+
+        // ② 两条绑定:个人空间 → root-multi-a;团队空间 → root-multi-b
+        var rootA = Path.Combine(work, "root-multi-a");
+        var rootB = Path.Combine(work, "root-multi-b");
+        Directory.CreateDirectory(rootA);
+        Directory.CreateDirectory(rootB);
+        // 多空间用**独立的数据目录**:状态库里记着"同步根身份",而前面的场景用的是另一个根 ——
+        // 共用一个 state.db 会被身份保护正确拦下("同步根身份变了 → 本轮不传播删除"),
+        // 那是保护在正常工作,却会让这个场景测不出它想测的东西。
+        var multiDir = Path.Combine(work, "multi");
+        Directory.CreateDirectory(multiDir);
+        var multiCfgPath = Path.Combine(multiDir, "client.json");
+        var multiCfg = ClientConfig.Load(multiCfgPath);
+        multiCfg.BaseUrl = baseUrl;
+        multiCfg.SpaceId = space.id;                 // 主空间 = 个人空间(沿用旧字段)
+        multiCfg.SyncRoot = rootA;
+        multiCfg.Onboarded = true;
+        multiCfg.Spaces = new List<SpaceBinding>
+        {
+            new() { SpaceId = space.id, SyncRoot = rootA },
+            new() { SpaceId = team.id, SyncRoot = rootB },
+        };
+        multiCfg.Save();
+        Check("⑯ 生效绑定数 = 2", ClientConfig.Load(multiCfgPath).EffectiveBindings.Count == 2,
+            $"实际 {ClientConfig.Load(multiCfgPath).EffectiveBindings.Count}");
+
+        await using var multi = SyncRuntime.FromStoredToken(ClientConfig.Load(multiCfgPath), tokenPath: tokenPath);
+        if (Environment.GetEnvironmentVariable("NETDISK_E2E_VERBOSE") == "1")
+        {
+            multi.Notice += m => Console.WriteLine($"     · {m}");
+        }
+        Check("⑯ 两棵本地树各自起了宿主(主 + 次)", multi.AllHosts.Count == 2, $"宿主数={multi.AllHosts.Count}");
+        Check("⑯ 启动成功", await multi.StartAsync());
+
+        // ③ 每个空间各放一个同名文件:内容必须各归各的空间
+        var shared = $"{prefix}-same-name.txt";
+        await File.WriteAllTextAsync(Path.Combine(rootA, shared), "belongs-to-personal");
+        await File.WriteAllTextAsync(Path.Combine(rootB, shared), "belongs-to-team");
+        await multi.ReconcileAsync();
+
+        var inPersonal = await files.FindByNameAsync(space.id, null, shared);
+        var inTeam = await files.FindByNameAsync(team.id, null, shared);
+        Check("⑯ 个人空间的文件出现在个人空间", inPersonal is not null);
+        Check("⑯ 团队空间的文件出现在团队空间", inTeam is not null);
+        Check("⑯ 两个空间里的同名文件是**两条不同记录**(没有互相覆盖)",
+            inPersonal is not null && inTeam is not null && inPersonal.id != inTeam.id,
+            inTeam is null || inPersonal is null ? "缺条目" : $"personal={inPersonal.id[..8]} team={inTeam.id[..8]}");
+
+        // 内容也要各归各:把两边的远端内容取回来比对(证明"上传没有串")
+        var stagingDir = Path.Combine(work, "multi-dl");
+        Directory.CreateDirectory(stagingDir);
+        if (inPersonal is not null && inTeam is not null)
+        {
+            var pa = Path.Combine(stagingDir, "p.txt");
+            var pb = Path.Combine(stagingDir, "t.txt");
+            await files.DownloadAsync(inPersonal.id, pa);
+            await files.DownloadAsync(inTeam.id, pb);
+            Check("⑯ 个人空间的文件内容 = 它自己那份",
+                (await File.ReadAllTextAsync(pa)) == "belongs-to-personal", await File.ReadAllTextAsync(pa));
+            Check("⑯ 团队空间的文件内容 = 它自己那份",
+                (await File.ReadAllTextAsync(pb)) == "belongs-to-team", await File.ReadAllTextAsync(pb));
+        }
+
+        // ④ 只放个人空间独有的文件 → 绝不该出现在团队空间
+        var onlyPersonal = $"{prefix}-only-personal.txt";
+        await File.WriteAllTextAsync(Path.Combine(rootA, onlyPersonal), "personal-only");
+        await multi.ReconcileAsync();
+        Check("⑯ 只在个人空间存在的文件**不会**被传进团队空间",
+            await files.FindByNameAsync(team.id, null, onlyPersonal) is null,
+            "团队空间里出现了不该出现的文件 = 空间串了");
+
+        // ⑤ 状态库必须按空间分开(混库正是"串数据"的温床)
+        var stateMain = Path.Combine(Path.GetDirectoryName(multiCfgPath)!, "state.db");
+        var stateSecond = Path.Combine(Path.GetDirectoryName(multiCfgPath)!, $"state-{team.id[..8]}.db");
+        Check("⑯ 两个空间各自的**状态库文件**都存在", File.Exists(stateMain) && File.Exists(stateSecond),
+            $"main={File.Exists(stateMain)} second={File.Exists(stateSecond)}");
+
+        // ⑥ 本地删除只该影响它自己那个空间
+        File.Delete(Path.Combine(rootA, shared));
+        await multi.ReconcileAsync();
+        Check("⑯ 删个人空间的文件 → 个人空间删掉了",
+            await files.FindByNameAsync(space.id, null, shared) is null);
+        Check("⑯ 删个人空间的文件 → **团队空间不受影响**",
+            await files.FindByNameAsync(team.id, null, shared) is not null);
+
+        // 收尾:团队空间里留下的测试文件清掉(空间本身由 admin 账号保留,不在这里解散)
+        foreach (var e in await files.ListAsync(team.id, null))
+        {
+            if (e.name.StartsWith("sync-check-", StringComparison.Ordinal))
+            {
+                using var del = await api.SendRawAsync(HttpMethod.Delete,
+                    $"/api/v1/files/{Uri.EscapeDataString(e.id)}",
+                    contentFactory: null, headers: null, idempotent: true);
+            }
+        }
+    }
 }
 finally
 {

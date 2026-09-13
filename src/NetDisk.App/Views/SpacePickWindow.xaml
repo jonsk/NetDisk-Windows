@@ -1,0 +1,26 @@
+<Window x:Class="NetDisk.App.Views.SpacePickWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="选择要同步的空间" Height="360" Width="440"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+  <!-- 多空间"添加绑定"的第一步:选空间。
+       为什么单独一个窗口而不是在主界面塞一个下拉:可选空间来自服务端(名字可能很长),
+       需要在选之前看清"哪些已经绑过了"——列表能把已绑定项标出来并禁用。 -->
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <TextBlock Grid.Row="0" TextWrapping="Wrap" Text="选择要同步到这个本地目录的空间:" />
+    <ListBox x:Name="List" Grid.Row="1" Margin="0,8,0,0" FontSize="13" />
+    <TextBlock x:Name="HintText" Grid.Row="2" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap" />
+
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="OkButton" Padding="18,6" FontWeight="SemiBold" Content="下一步:选目录" Click="OnOk" />
+      <Button Margin="8,0,0,0" Padding="18,6" Content="取消" Click="OnCancel" />
+    </StackPanel>
+  </Grid>
+</Window>

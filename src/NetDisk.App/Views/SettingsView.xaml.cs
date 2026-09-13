@@ -51,7 +51,149 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         PathText.Text = $"配置文件:{runtime.Config.Path}\n" +
                         $"数据目录:{ClientPaths.DataDirectory}" +
                         (ClientPaths.FallbackReason is { } why ? $" (回退:{why})" : "");
+        _runtime = runtime;
+        ReloadSpaceList();
         StatusText.Text = "";
+    }
+
+    // ---------------------------------------------------------------- 多空间(绑定管理)
+
+    private SyncRuntime? _runtime;
+    /// <summary>界面上的空间名(id → 名字),来自服务端的空间列表;取不到就只显示短 id。</summary>
+    private readonly Dictionary<string, string> _spaceNames = new(StringComparer.Ordinal);
+    private readonly System.Collections.ObjectModel.ObservableCollection<string> _spaceRows = new();
+
+    private void ReloadSpaceList()
+    {
+        _spaceRows.Clear();
+        foreach (var b in _config?.EffectiveBindings ?? Array.Empty<SpaceBinding>())
+        {
+            var name = _spaceNames.TryGetValue(b.SpaceId, out var n) ? n : b.SpaceId[..Math.Min(8, b.SpaceId.Length)];
+            var kind = b.StructureOnly == true ? "(仅结构)" : "";
+            _spaceRows.Add($"{name}{kind}  →  {b.SyncRoot}");
+        }
+        SpaceList.ItemsSource = _spaceRows;
+        // 顺带把空间名拉回来(只为了显示;失败不影响绑定管理)
+        _ = LoadSpaceNamesAsync();
+    }
+
+    private async Task LoadSpaceNamesAsync()
+    {
+        if (_runtime is null)
+        {
+            return;
+        }
+        try
+        {
+            var list = await new NetDisk.Transport.SpaceCollabClient(_runtime.Api).ListMineAsync();
+            foreach (var s in list.spaces ?? new List<SpaceView>())
+            {
+                _spaceNames[s.id] = string.IsNullOrWhiteSpace(s.name) ? s.id[..Math.Min(8, s.id.Length)] : s.name;
+            }
+            ReloadSpaceList();
+        }
+        catch (Exception)
+        {
+            // 名字只是显示;取不到就用短 id(不弹框打扰用户)
+        }
+    }
+
+    /// <summary>添加一个空间绑定:选空间 → 选本地目录。</summary>
+    private async void OnAddSpace(object sender, RoutedEventArgs e)
+    {
+        if (_config is null || _runtime is null)
+        {
+            return;
+        }
+        List<SpaceView> spaces;
+        try
+        {
+            var list = await new NetDisk.Transport.SpaceCollabClient(_runtime.Api).ListMineAsync();
+            spaces = (list.spaces ?? new List<SpaceView>()).ToList();
+        }
+        catch (Exception ex)
+        {
+            Fail("取空间列表失败:" + ex.Message);
+            return;
+        }
+        if (spaces.Count == 0)
+        {
+            Fail("这个账号没有可见空间。");
+            return;
+        }
+
+        var pick = new SpacePickWindow(spaces, _config.EffectiveBindings.Select(b => b.SpaceId).ToHashSet())
+        {
+            Owner = Window.GetWindow(this),
+        };
+        if (pick.ShowDialog() != true || pick.Selected is null)
+        {
+            return;
+        }
+        var folder = new OpenFolderDialog { Title = "选择这个空间的本地同步目录" };
+        if (folder.ShowDialog() != true)
+        {
+            return;
+        }
+        if (IsRootAlreadyBound(folder.FolderName, pick.Selected.id, out var clash))
+        {
+            Fail($"这个目录已经绑给另一个空间了:{clash}。请为每个空间选不同的目录。");
+            return;
+        }
+
+        // 写回配置:spaces 列表才是权威(旧的单空间三件套保留作主空间)
+        var bindings = _config.EffectiveBindings
+            .Select(b => new SpaceBinding { SpaceId = b.SpaceId, SyncRoot = b.SyncRoot, ParentId = b.ParentId, StructureOnly = b.StructureOnly })
+            .ToList();
+        bindings.Add(new SpaceBinding { SpaceId = pick.Selected.id, SyncRoot = folder.FolderName });
+        _config.Spaces = bindings;
+        _config.Save();
+        AppLog.Write("app", $"已添加空间绑定:{pick.Selected.id} → {folder.FolderName}(重启同步后生效)");
+        ReloadSpaceList();
+        StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
+        StatusText.Text = "已添加。点「保存并重启同步」后按新配置生效。";
+    }
+
+    /// <summary>移除选中的绑定(只解除绑定,不删本地文件)。</summary>
+    private void OnRemoveSpace(object sender, RoutedEventArgs e)
+    {
+        if (_config is null || SpaceList.SelectedIndex < 0)
+        {
+            StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
+            StatusText.Text = "请先在上面选中一条绑定。";
+            return;
+        }
+        var bindings = _config.EffectiveBindings.ToList();
+        // 主空间不允许在这里移除:它承载 legacy 三件套(space_id/sync_root),
+        // 允许多空间的同时不破坏老配置的语义 —— 想换主空间就改上面的"同步目录"。
+        if (SpaceList.SelectedIndex == 0)
+        {
+            Fail("第一条是**主空间**(对应上面的服务器/同步目录设置),不能在这里移除;请先移除其它空间。");
+            return;
+        }
+        var victim = bindings[SpaceList.SelectedIndex];
+        bindings.RemoveAt(SpaceList.SelectedIndex);
+        _config.Spaces = bindings;
+        _config.Save();
+        AppLog.Write("app", $"已移除空间绑定:{victim.SpaceId} → {victim.SyncRoot}(本地文件未删除)");
+        ReloadSpaceList();
+        StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
+        StatusText.Text = "已移除(本地文件没有删除)。点「保存并重启同步」后生效。";
+    }
+
+    private bool IsRootAlreadyBound(string root, string spaceId, out string clash)
+    {
+        foreach (var b in _config?.EffectiveBindings ?? Array.Empty<SpaceBinding>())
+        {
+            if (!string.Equals(b.SpaceId, spaceId, StringComparison.Ordinal)
+                && string.Equals(Path.GetFullPath(b.SyncRoot), Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+            {
+                clash = b.SpaceId;
+                return true;
+            }
+        }
+        clash = "";
+        return false;
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)

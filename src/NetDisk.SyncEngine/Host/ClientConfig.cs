@@ -104,6 +104,66 @@ public sealed class ClientConfig
     public string Path { get; private set; } = "";
 
     /// <summary>
+    /// **多个空间的绑定**(每个空间 ↔ 一个本地同步目录)。
+    ///
+    /// 为什么要有它:一个账号常常既有个人空间又有若干个团队空间,而"我只想把团队空间同步到 D 盘某个目录、
+    /// 个人空间同步到另一个目录"是完全正常的需求。单空间配置只能二选一。
+    ///
+    /// 与旧字段的关系:**向后兼容,不做迁移** —— `spaces` 为空时,生效的绑定就是上面那三件套
+    /// (`space_id`/`sync_root`/`parent_id`),所以老配置文件的行为一字不变。
+    /// </summary>
+    [JsonPropertyName("spaces")]
+    public List<SpaceBinding> Spaces { get; set; } = new();
+
+    /// <summary>
+    /// 生效的空间绑定列表(有序;第一个是主空间)。
+    /// 配置里没写 `spaces` 就回落成老的单空间三件套;两者都缺就返回空(还没配好)。
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<SpaceBinding> EffectiveBindings
+    {
+        get
+        {
+            var list = Spaces
+                .Where(b => !string.IsNullOrWhiteSpace(b.SpaceId) && !string.IsNullOrWhiteSpace(b.SyncRoot))
+                .ToList();
+            if (list.Count > 0)
+            {
+                return list;
+            }
+            return string.IsNullOrWhiteSpace(SpaceId) || string.IsNullOrWhiteSpace(SyncRoot)
+                ? Array.Empty<SpaceBinding>()
+                : new[]
+                {
+                    new SpaceBinding
+                    {
+                        SpaceId = SpaceId,
+                        SyncRoot = SyncRoot,
+                        ParentId = ParentId,
+                        StructureOnly = StructureOnly,
+                    },
+                };
+        }
+    }
+
+    /// <summary>
+    /// 复制一份"只改空间绑定、其余设置照旧"的配置(多空间下每个空间一个宿主,各拿一份)。
+    ///
+    /// `Path` 保留同一个值:配置本身只有一份(用户改的是同一份文件),
+    /// 各空间的**状态库**由 <c>SyncRuntime</c> 显式按空间分文件,见那里的说明。
+    /// </summary>
+    public ClientConfig ForBinding(SpaceBinding binding)
+    {
+        var clone = (ClientConfig)MemberwiseClone();
+        clone.SpaceId = binding.SpaceId;
+        clone.SyncRoot = binding.SyncRoot;
+        clone.ParentId = binding.ParentId ?? "";
+        clone.StructureOnly = binding.StructureOnly ?? StructureOnly;
+        clone.Spaces = new List<SpaceBinding>(); // 副本只服务单个空间,不该再展开成多空间
+        return clone;
+    }
+
+    /// <summary>
     /// 配置默认位置:**程序所在目录**下的 <c>client.json</c>(该目录不可写时回退 %APPDATA%\NetDisk)。
     /// 见 <see cref="ClientPaths"/>:位置只有一处定义,别处不许再拼路径。
     /// </summary>
