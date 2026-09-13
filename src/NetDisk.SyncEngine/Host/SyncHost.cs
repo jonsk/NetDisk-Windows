@@ -43,7 +43,18 @@ namespace NetDisk.SyncEngine.Host;
 /// <param name="State">状态。</param>
 /// <param name="Message">补充说明(错误原因/冲突副本名等)。</param>
 /// <param name="Version">已知的远端版本(0 = 未知)。</param>
-public sealed record SyncEntryStatus(string RelativePath, SyncState State, string Message, long Version);
+public sealed record SyncEntryStatus(string RelativePath, SyncState State, string Message, long Version)
+{
+    /// <summary>
+    /// 当前这个文件传到多少了(0-100;null = 此刻没有正在进行的传输)。
+    ///
+    /// 为什么要它:状态文字只能说"上传中",而用户真正想知道的是"还要多久" ——
+    /// 大文件(几 GB)在 UI 上长时间只显示"上传中",和卡住无法区分。
+    /// 进度来自 <see cref="TransferQueue.Progress"/> 事件(按阈值节流,不是每片都上报),
+    /// 所以它是"尽力而为"的显示值:丢了某一档不影响正确性,最终一定回到 null(传输结束)。
+    /// </summary>
+    public double? ProgressPercent { get; init; }
+}
 
 /// <summary>同步宿主:登录 + 对账 + 本地监听→上传 + 远端事件→下载 + 冲突副本。</summary>
 public sealed class SyncHost : IAsyncDisposable
@@ -114,6 +125,7 @@ public sealed class SyncHost : IAsyncDisposable
         // 否则那份带 `_说明` 的配置在骗用户("我改了限速却没变化"是最难查的一类问题)。
         QueueOptions = BuildQueueOptions(_config);
         _queue = new TransferQueue(QueueOptions, _clock);
+        _queue.Progress += OnQueueProgress; // 界面上的"传到多少了"来自这里
         if (watchLocal && !string.IsNullOrWhiteSpace(_config.SyncRoot))
         {
             _watcher = new FileWatcher(new FileSystemWatcherBackend(_config.SyncRoot), _clock);
@@ -568,15 +580,18 @@ public sealed class SyncHost : IAsyncDisposable
     {
         var local = LocalOf(rel);
         Upsert(rel, SyncState.PendingDownload, "", entry.version);
+        _jobRel["dl:" + entry.id] = rel; // 进度事件只带 job id,这里先建立映射
         _queue.Enqueue(new TransferJob
         {
             Id = "dl:" + entry.id,
             DisplayName = rel,
             Direction = TransferDirection.Download,
             TotalBytes = entry.size,
-            Run = async (_, token) =>
+            Run = async (progress, token) =>
             {
-                var n = await _files.DownloadAsync(entry.id, local, token).ConfigureAwait(false);
+                // **把进度接上**:下载侧此前没有进度参数,上传侧传的是 null ——
+                // 于是界面上"上传中/下载中"永远只是一个词,大文件与卡住无法区分(实测发现)。
+                var n = await _files.DownloadAsync(entry.id, local, progress, token).ConfigureAwait(false);
                 RecordState(entry, rel, local);
                 if (finalState is { } f)
                 {
@@ -607,20 +622,21 @@ public sealed class SyncHost : IAsyncDisposable
 
         var spaceId = await ResolveSpaceIdAsync(ct).ConfigureAwait(false);
         var parentId = await EnsureParentDirAsync(rel, ct).ConfigureAwait(false);
+        _jobRel["ul:" + rel] = rel; // 进度事件只带 job id,这里先建立映射
         _queue.Enqueue(new TransferJob
         {
             Id = "ul:" + rel,
             DisplayName = rel,
             Direction = TransferDirection.Upload,
             TotalBytes = info.Length,
-            Run = async (_, token) =>
+            Run = async (progress, token) =>
             {
                 EntryView after;
                 if (remoteEntry is null)
                 {
                     // 远端没有同名文件:TUS 建任务(分片 + 断点续传)
                     var res = await _files.UploadAsync(
-                        spaceId, parentId, Path.GetFileName(local), local, null,
+                        spaceId, parentId, Path.GetFileName(local), local, progress,
                         allowOverwrite: false, token)
                         .ConfigureAwait(false);
                     after = new EntryView
@@ -640,7 +656,7 @@ public sealed class SyncHost : IAsyncDisposable
                     // 用 TUS 建任务会被 409 name_conflict 拒掉(上传任务占名,ADR-5)——
                     // 实测就是这样,导致"改本地已有文件"永远同步不出去。
                     var repl = await _files.UploadAsync(
-                        spaceId, parentId, Path.GetFileName(local), local, null,
+                        spaceId, parentId, Path.GetFileName(local), local, progress,
                         allowOverwrite: true, token).ConfigureAwait(false);
                     after = await _files.GetEntryAsync(repl.FileId, token).ConfigureAwait(false);
                 }
@@ -736,12 +752,12 @@ public sealed class SyncHost : IAsyncDisposable
         }
     }
 
-    private void Upsert(string rel, SyncState state, string message, long version)
+    private void Upsert(string rel, SyncState state, string message, long version, double? progress = null)
     {
         lock (_gate)
         {
             var i = _status.FindIndex(s => string.Equals(s.RelativePath, rel, StringComparison.OrdinalIgnoreCase));
-            var item = new SyncEntryStatus(rel, state, message, version);
+            var item = new SyncEntryStatus(rel, state, message, version) { ProgressPercent = progress };
             if (i >= 0)
             {
                 _status[i] = item;
@@ -752,6 +768,34 @@ public sealed class SyncHost : IAsyncDisposable
             }
             StatusChanged?.Invoke(_status.ToArray());
         }
+    }
+
+    /// <summary>任务 id → 相对路径(进度事件只带 job id,而界面按路径显示)。</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _jobRel =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// 把传输进度映射成"这个文件传到多少了"。
+    ///
+    /// 注意三件事:
+    ///   · 进度事件在**后台线程**上触发(队列的工作线程),所以只更新状态列表、不碰 UI;
+    ///   · 传输结束时队列会再发一条 `Completed`,那时把进度清成 null(否则大文件传完还挂着 87%);
+    ///   · 查不到 rel(任务已被替换/已结束)就忽略 —— 这是节流事件的正常情况,不是错误。
+    /// </summary>
+    private void OnQueueProgress(TransferProgress p)
+    {
+        if (!_jobRel.TryGetValue(p.JobId, out var rel))
+        {
+            return;
+        }
+        if (p.Completed || p.Failed)
+        {
+            _jobRel.TryRemove(p.JobId, out _);
+            return; // 收尾状态由任务自身的代码写(那里知道最终版本号)
+        }
+        var percent = p.TotalBytes > 0 ? Math.Min(100.0, p.DoneBytes * 100.0 / p.TotalBytes) : (double?)null;
+        Upsert(rel, p.Direction == TransferDirection.Upload ? SyncState.PendingUpload : SyncState.PendingDownload,
+            "", KnownVersion(rel), percent);
     }
 
     public async ValueTask DisposeAsync()
@@ -781,6 +825,7 @@ public sealed class SyncHost : IAsyncDisposable
                 }
             }
         }
+        _queue.Progress -= OnQueueProgress;
         await _queue.DisposeAsync().ConfigureAwait(false);
         _store.Dispose();
     }

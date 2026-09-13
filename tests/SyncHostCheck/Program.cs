@@ -554,6 +554,52 @@ try
         Check("⑨ 暂停/恢复不动数据(本地文件仍在)",
             File.Exists(Path.Combine(root, pausedName)));
     }
+
+    // ------------------------------------------------ ⑩ 每文件进度百分比
+    // 大文件在界面上长时间只显示"上传中",与卡住无法区分 —— 所以进度必须真的能透出来。
+    // 断言方式:传一个**足够大**的文件(> 队列默认 1MB 的上报阈值,取 8MB),
+    // 收集 StatusChanged 快照,要求其中**至少有一帧**该文件的进度落在 (0,100);
+    // 并断言**收尾时进度被清空**(否则传完还挂着 87%,比不显示更误导)。
+    Console.WriteLine();
+    Console.WriteLine("— ⑩ 每文件进度百分比");
+    {
+        var bigName = $"sync-check-{DateTime.Now:HHmmss}-big.bin";
+        var bigPath = Path.Combine(root, bigName);
+        var bytes = new byte[8 * 1024 * 1024];
+        Random.Shared.NextBytes(bytes);
+        await File.WriteAllBytesAsync(bigPath, bytes);
+
+        var frames = new List<double?>();
+        await using (var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false))
+        {
+            host.StatusChanged += snap =>
+            {
+                var row = snap.FirstOrDefault(s => s.RelativePath == bigName);
+                if (row is not null)
+                {
+                    lock (frames)
+                    {
+                        frames.Add(row.ProgressPercent);
+                    }
+                }
+            };
+            await host.StartAsync();
+            await host.ReconcileAsync();
+        }
+
+        List<double?> snapshot;
+        lock (frames)
+        {
+            snapshot = frames.ToList();
+        }
+        var mid = snapshot.Where(p => p is > 0 and < 100).ToList();
+        Check("⑩ 上传过程中能看到中间进度(0 < 进度 < 100)",
+            mid.Count > 0, $"共 {snapshot.Count} 帧,中间帧 {mid.Count} 帧");
+        Check("⑩ 收尾时进度被清空(不留半截百分比)",
+            snapshot.Count > 0 && snapshot[^1] is null, $"最后一帧={snapshot.LastOrDefault()?.ToString() ?? "null"}");
+        Check("⑩ 大文件最终确实传上去了",
+            await files.FindByNameAsync(space.id, null, bigName) is not null);
+    }
 }
 finally
 {

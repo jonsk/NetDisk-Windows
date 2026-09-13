@@ -1,4 +1,4 @@
-﻿// TUS 分片上传客户端(DE-D-06)。
+// TUS 分片上传客户端(DE-D-06)。
 //
 // 协议面(服务端 6.10 / 7.7 A-10):
 //   POST   /api/v1/upload/create      {space_id,parent_id,name,size,hash} → upload_id + upload_ticket
@@ -198,7 +198,7 @@ public sealed class TusUploader
             PatchOutcome result;
             try
             {
-                result = await PatchChunkAsync(handle, chunk, offset, ct).ConfigureAwait(false);
+                result = await PatchChunkAsync(handle, chunk, offset, ct, progress).ConfigureAwait(false);
                 resyncs = 0;
             }
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Conflict || ex.IsTransient)
@@ -243,14 +243,21 @@ public sealed class TusUploader
     }
 
     private async Task<PatchOutcome> PatchChunkAsync(
-        UploadHandle handle, byte[] chunk, long offset, CancellationToken ct)
+        UploadHandle handle, byte[] chunk, long offset, CancellationToken ct,
+        IProgress<long>? progress = null)
     {
         using var resp = await _api.SendRawAsync(
             HttpMethod.Patch, "/tus/" + handle.UploadId,
             // 工厂:重试时**重建** body(同一个 HttpContent 不能发两次)
             contentFactory: () =>
             {
-                var c = new ByteArrayContent(chunk);
+                // **按字节上报进度**,而不是按分片:分片默认 8MB,若只在分片边界上报,
+                // 小于 16MB 的文件在界面上永远是"上传中"(首尾两档),与卡住无法区分。
+                // 这里把 body 包一层计数流:HTTP 栈每读走一段就报一次累计字节
+                // (节流交给调用方:传输队列按阈值过滤,所以这里可以每块都报)。
+                var body = new CountingStream(new MemoryStream(chunk, writable: false),
+                    read => progress?.Report(offset + read));
+                var c = new StreamContent(body);
                 c.Headers.TryAddWithoutValidation("Content-Type", "application/offset+octet-stream");
                 return c;
             },
@@ -332,4 +339,72 @@ public sealed class TusUploader
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
+}
+
+/// <summary>
+/// 计数流:把"读走了多少字节"回调出去(给上传进度用)。
+///
+/// 为什么需要它:TUS 的分片默认 8MB,**只在分片边界上报进度**的话,
+/// 小于 16MB 的文件在界面上永远只有"上传中"两个状态,用户无法与"卡住"区分。
+/// 包一层计数流后,HTTP 栈每读一段就报一次,任何大小的文件都有连续进度。
+/// 只实现读路径(上传只读),写/定位等一律 Delegate 给内层流。
+/// </summary>
+internal sealed class CountingStream : Stream
+{
+    private readonly Stream _inner;
+    private readonly Action<long> _onRead;
+    private long _read;
+
+    public CountingStream(Stream inner, Action<long> onRead)
+    {
+        _inner = inner;
+        _onRead = onRead;
+    }
+
+    public override bool CanRead => _inner.CanRead;
+    public override bool CanSeek => _inner.CanSeek;
+    public override bool CanWrite => false;
+    public override long Length => _inner.Length;
+
+    public override long Position
+    {
+        get => _inner.Position;
+        set => _inner.Position = value;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        var n = _inner.Read(buffer, offset, count);
+        if (n > 0)
+        {
+            _read += n;
+            _onRead(_read);
+        }
+        return n;
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+    {
+        var n = await _inner.ReadAsync(buffer, ct).ConfigureAwait(false);
+        if (n > 0)
+        {
+            _read += n;
+            _onRead(_read);
+        }
+        return n;
+    }
+
+    public override void Flush() => _inner.Flush();
+    public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _inner.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }

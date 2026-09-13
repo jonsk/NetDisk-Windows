@@ -215,7 +215,12 @@ public sealed class FileApi
     /// 下载到本地路径(流式,不整文件进内存)。
     /// 返回实际写入的字节数;父目录不存在会自动创建。
     /// </summary>
-    public async Task<long> DownloadAsync(string fileId, string localPath, CancellationToken ct = default)
+    /// <param name="progress">
+    /// 已写入字节数的进度回调(可空)。**每读完一块就报一次**,
+    /// 节流交给调用方(传输队列按阈值节流)—— 在这里自己节流会让"小文件也能显示进度"落空。
+    /// </param>
+    public async Task<long> DownloadAsync(string fileId, string localPath,
+        IProgress<long>? progress = null, CancellationToken ct = default)
     {
         var dir = Path.GetDirectoryName(localPath);
         if (!string.IsNullOrEmpty(dir))
@@ -246,6 +251,7 @@ public sealed class FileApi
             {
                 await dst.WriteAsync(buf.AsMemory(0, n), ct).ConfigureAwait(false);
                 written += n;
+                progress?.Report(written);
             }
         }
 

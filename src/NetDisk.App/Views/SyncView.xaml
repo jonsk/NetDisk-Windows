@@ -39,7 +39,8 @@
         <GridView>
           <GridViewColumn Header="文件" Width="320" DisplayMemberBinding="{Binding File}" />
           <GridViewColumn Header="状态" Width="90" DisplayMemberBinding="{Binding StateText}" />
-          <GridViewColumn Header="说明" Width="300" DisplayMemberBinding="{Binding Message}" />
+          <GridViewColumn Header="进度" Width="60" DisplayMemberBinding="{Binding ProgressText}" />
+          <GridViewColumn Header="说明" Width="270" DisplayMemberBinding="{Binding Message}" />
           <GridViewColumn Header="版本" Width="60" DisplayMemberBinding="{Binding Version}" />
         </GridView>
       </ListView.View>
