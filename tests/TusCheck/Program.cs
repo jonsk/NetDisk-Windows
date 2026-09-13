@@ -22,13 +22,16 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("② 中断后续传:从服务端偏移继续,内容不重不漏", CheckResumeAsync),
     ("③ 片中 5xx 原地重试:同一偏移、同一 ticket", CheckChunkRetryAsync),
     ("④ 写满即定稿:200 + X-File-Id,不再走 finish", CheckInlineFinalizeAsync),
-    ("⑤ 未即时定稿时走 finish", CheckExplicitFinishAsync),
+    ("⑤ 未即时定稿 → 用**空体 PATCH** 定稿(绝不再调秒传 finish)", CheckExplicitFinishAsync),
     ("⑥ 507 额度不足不重试", CheckQuotaNotRetriedAsync),
     ("⑦ 404(任务丢失)不重试并给出结构化错误", CheckTaskGoneAsync),
     ("⑧ 取消上传:DELETE 带 ticket 且幂等", CheckCancelAsync),
     ("⑨ 建任务不自动重试(避免重复预留额度)", CheckCreateNotRetriedAsync),
     ("⑩ 内容超过声明大小时不越界(以服务端定稿为准)", CheckChunkingAndContentAsync),
     ("⑪ 片落了一半 → 自动重新对齐并继续(同一次调用内自愈)", CheckPartialChunkSelfHealAsync),
+    ("⑫ **0 字节文件**能传上去:一次空体 PATCH 定稿,绝不调秒传 finish", CheckEmptyFileAsync),
+    ("⑬ 4xx(非暂时)失败 → **取消任务**(不留占着名字的上传任务)", CheckHopelessCancelsAsync),
+    ("⑭ 暂时性失败(5xx)**不**取消(保住断点续传状态)", CheckTransientKeepsTaskAsync),
 };
 
 var failed = 0;
@@ -132,16 +135,68 @@ static async Task CheckInlineFinalizeAsync()
 
 static async Task CheckExplicitFinishAsync()
 {
-    // 声明 48 字节但只发 32:内容发完后服务端还没满 → 必须走显式 finish
+    // 声明 32 字节、内容也是 32:服务端**第一次**写满时没定稿(RequireExplicitFinish),
+    // 客户端必须再发一次定稿动作 —— 而那个动作是**空体 PATCH**,不是秒传 finish。
     var s = new FakeTus { DeclaredSize = 32, RequireExplicitFinish = true };
     var up = new TusUploader(Client(s), chunkSize: 16);
     var handle = await up.CreateAsync(new UploadRequest { SpaceId = "sp", Name = "a.bin", Size = 32 });
     var res = await up.UploadAsync(handle, new MemoryStream(Payload(32)));
 
-    Assert(!res.FinalizedInline, "服务端未即时定稿时应走 finish");
-    Assert(s.Requests.Any(r => r.Method == "POST" && r.Uri.EndsWith("/finish")), "应当调用 finish");
-    Assert(s.Requests.Last(r => r.Method == "POST" && r.Uri.EndsWith("/finish")).Ticket == "TICKET-1",
-        "finish 也必须带 ticket(只带 Bearer 会被 401)");
+    Assert(!res.FinalizedInline, "服务端未即时定稿时应走显式定稿");
+    Assert(res.FileId == "file-1", $"应当拿到文件 id,实际 '{res.FileId}'");
+    var patches = s.Requests.Where(r => r.Method == "PATCH" && r.Uri.StartsWith("/tus/")).ToList();
+    Assert(patches.Count == 3, $"应为 16+16+空体 三次 PATCH,实际 {patches.Count} 次");
+    Assert(s.LastPatchLength == 0, $"第三次 PATCH 必须是**空体**(定稿动作),实际 {s.LastPatchLength} 字节");
+    Assert(!s.Requests.Any(r => r.Uri.EndsWith("/finish", StringComparison.Ordinal)),
+        "**绝不能**调 /upload/{id}/finish:那是秒传(持物证明)端点,契约要求 nonce,拿它当普通定稿会 400「缺少 nonce」");
+}
+
+static async Task CheckEmptyFileAsync()
+{
+    // 用户实测的那条路径:**0 字节文件**。第一次读就是 0,以前直接去调秒传 finish → 400「缺少 nonce」,
+    // 而且失败后任务行占着名字(24h),后续每次重试都 409 —— 文件永远传不上去。
+    var s = new FakeTus { DeclaredSize = 0 };
+    var up = new TusUploader(Client(s), chunkSize: 16);
+    var handle = await up.CreateAsync(new UploadRequest { SpaceId = "sp", Name = "空.bmp", Size = 0 });
+    var res = await up.UploadAsync(handle, new MemoryStream(Array.Empty<byte>()));
+
+    Assert(res.FileId == "file-1", $"0 字节文件必须能定稿并拿到 id,实际 '{res.FileId}'");
+    var patches = s.Requests.Where(r => r.Method == "PATCH" && r.Uri.StartsWith("/tus/")).ToList();
+    Assert(patches.Count == 1, $"0 字节文件应恰好发一次(空体)PATCH,实际 {patches.Count} 次");
+    Assert(s.LastPatchLength == 0, $"那次 PATCH 必须是空体,实际 {s.LastPatchLength} 字节");
+    Assert(!s.Requests.Any(r => r.Uri.EndsWith("/finish", StringComparison.Ordinal)),
+        "0 字节文件不得调用秒传 finish(会 400「缺少 nonce」,并把名字占死)");
+    Assert(!s.Requests.Any(r => r.Method == "DELETE" && r.Uri.StartsWith("/api/v1/upload/", StringComparison.Ordinal)),
+        "成功路径不该取消任务");
+}
+
+static async Task CheckHopelessCancelsAsync()
+{
+    // 400 = 这个任务已经没救了。**必须取消**:不取消就占着名字直到过期(默认 24h),
+    // 之后每轮重试都只会 409「同目录下已有一个正在上传的同名文件」。
+    var s = new FakeTus { DeclaredSize = 16, PatchStatus = HttpStatusCode.BadRequest };
+    var up = new TusUploader(Client(s, zeroDelay: true), chunkSize: 16);
+    var handle = await up.CreateAsync(new UploadRequest { SpaceId = "sp", Name = "a.bin", Size = 16 });
+
+    var ex = await Catch<ApiException>(() => up.UploadAsync(handle, new MemoryStream(Payload(16))));
+    Assert(ex.Status == HttpStatusCode.BadRequest, $"应抛出 400,实际 {ex.Status}");
+    var cancels = s.Requests.Where(r =>
+        r.Method == "DELETE" && r.Uri == "/api/v1/upload/up-1").ToList();
+    Assert(cancels.Count == 1, $"应恰好取消任务一次,实际 {cancels.Count} 次");
+    Assert(cancels[0].Ticket == "TICKET-1", "取消也必须带 ticket");
+}
+
+static async Task CheckTransientKeepsTaskAsync()
+{
+    // 500 = 暂时性。**不能**取消:任务与服务端已收的字节还在,
+    // 下一轮对账可以**从偏移继续**(取消等于把断点续传的成果扔掉)。
+    var s = new FakeTus { DeclaredSize = 16, PatchStatus = HttpStatusCode.InternalServerError };
+    var up = new TusUploader(Client(s, zeroDelay: true), chunkSize: 16);
+    var handle = await up.CreateAsync(new UploadRequest { SpaceId = "sp", Name = "a.bin", Size = 16 });
+
+    await Catch<ApiException>(() => up.UploadAsync(handle, new MemoryStream(Payload(16))));
+    Assert(!s.Requests.Any(r => r.Method == "DELETE"),
+        "暂时性失败不该取消任务(否则断点续传状态被扔掉)");
 }
 
 static async Task CheckQuotaNotRetriedAsync()
@@ -295,6 +350,12 @@ sealed class FakeTus : HttpMessageHandler
     public HttpStatusCode DeleteStatus { get; set; } = HttpStatusCode.NoContent;
     public List<Recorded> Requests { get; } = new();
 
+    /// <summary>最近一次 PATCH 的请求体字节数(用来断言"空体 PATCH"这个定稿动作)。</summary>
+    public long LastPatchLength { get; private set; } = -1;
+
+    /// <summary>RequireExplicitFinish 模式下:第一次写满时不定稿,等一个**空体 PATCH** 才定稿。</summary>
+    private bool _awaitingFinalizePatch;
+
     public sealed record Recorded(string Method, string Uri, long Offset, string? Ticket);
 
     public int StoredBytes() => _store.Count;
@@ -342,6 +403,7 @@ sealed class FakeTus : HttpMessageHandler
                 return Resp(HttpStatusCode.InternalServerError, "{\"code\":\"internal_error\",\"message\":\"模拟分片失败\"}");
             }
             var bytes = await request.Content!.ReadAsByteArrayAsync(ct);
+            LastPatchLength = bytes.Length;
 
             if (PartialAcceptTimes > 0)
             {
@@ -369,10 +431,21 @@ sealed class FakeTus : HttpMessageHandler
             }
             _store.AddRange(bytes);
 
+            // RequireExplicitFinish:第一次写满时**不定稿**(204),等客户端再发一个
+            // **空体 PATCH** 才定稿 —— 这正是真实服务端的语义(`newOffset >= DeclaredSize`
+            // 时定稿,0 字节文件 `0 >= 0` 也成立)。
             var atEnd = _store.Count >= DeclaredSize;
-            var resp = Resp(atEnd && !RequireExplicitFinish ? HttpStatusCode.OK : HttpStatusCode.NoContent, "");
+            if (atEnd && RequireExplicitFinish && bytes.Length > 0)
+            {
+                _awaitingFinalizePatch = true;
+                var pending = Resp(HttpStatusCode.NoContent, "");
+                pending.Headers.TryAddWithoutValidation("Upload-Offset", _store.Count.ToString());
+                return pending;
+            }
+            var shouldFinalize = atEnd && (!RequireExplicitFinish || _awaitingFinalizePatch || bytes.Length == 0);
+            var resp = Resp(atEnd && shouldFinalize ? HttpStatusCode.OK : HttpStatusCode.NoContent, "");
             resp.Headers.TryAddWithoutValidation("Upload-Offset", _store.Count.ToString());
-            if (atEnd && !RequireExplicitFinish)
+            if (atEnd && shouldFinalize)
             {
                 resp.Headers.TryAddWithoutValidation("Upload-Complete", "true");
                 resp.Headers.TryAddWithoutValidation("X-File-Id", "file-1");

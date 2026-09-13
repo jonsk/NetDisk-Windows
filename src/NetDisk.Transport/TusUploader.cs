@@ -92,6 +92,7 @@ public sealed class TusUploader
     private const string TusVersion = "1.0.0";
     private const string TusHeader = "Tus-Resumable";
     private const string OffsetHeader = "Upload-Offset";
+    private const string LengthHeader = "Upload-Length";
     private const string TicketHeader = "X-Upload-Token";
     private const string CompleteHeader = "Upload-Complete";
 
@@ -143,7 +144,16 @@ public sealed class TusUploader
     }
 
     /// <summary>取服务端的当前偏移(HEAD)。**续传的权威偏移**,不要用本地计数。</summary>
-    public async Task<long> GetServerOffsetAsync(UploadHandle handle, CancellationToken ct = default)
+    public async Task<long> GetServerOffsetAsync(UploadHandle handle, CancellationToken ct = default) =>
+        (await HeadAsync(handle, ct).ConfigureAwait(false)).Offset;
+
+    /// <summary>
+    /// HEAD 一次拿到**偏移与声明长度**(契约 `HEAD /api/v1/upload/{id}` 回 `Upload-Offset` 与 `Upload-Length`)。
+    ///
+    /// 定稿判定要用到两者:只有"偏移已经等于声明长度"时,空体 PATCH 才会触发定稿。
+    /// 分开两次 HEAD 没有意义(服务端同一次就给了两个头)。
+    /// </summary>
+    public async Task<(long Offset, long? Length)> HeadAsync(UploadHandle handle, CancellationToken ct = default)
     {
         using var resp = await _api.SendRawAsync(
             HttpMethod.Head, "/api/v1/upload/" + handle.UploadId,
@@ -156,7 +166,8 @@ public sealed class TusUploader
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             throw ApiClient.ParseError(resp.StatusCode, body);
         }
-        return ReadOffset(resp) ?? 0;
+        var lenRaw = Header(resp, LengthHeader);
+        return (ReadOffset(resp) ?? 0, long.TryParse(lenRaw, out var len) ? len : null);
     }
 
     /// <summary>
@@ -183,14 +194,24 @@ public sealed class TusUploader
 
         var buffer = new byte[_chunkSize];
         var resyncs = 0;
-        while (true)
+        try
         {
-            var read = await ReadFullAsync(content, buffer, ct).ConfigureAwait(false);
-            if (read == 0)
+            while (true)
             {
-                // 内容发完但服务端还没定稿(声明大小与实际不一致,或最后一片恰好是整块):
-                // 走显式 finish —— 与"最后一片即定稿"是同一条定稿路径,只是多一次往返。
-                return await FinishAsync(handle, offset, finalizedInline: false, ct).ConfigureAwait(false);
+                var read = await ReadFullAsync(content, buffer, ct).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    // 内容发完但服务端还没定稿 —— 最常见的就是**0 字节文件**(第一次读就是 0)。
+                    //
+                    // ⚠ 这里曾经调用 `POST /api/v1/upload/{id}/finish`。那是**秒传定稿**端点
+                //    (契约:`nonce` + `sample_sha256` 必填,靠持物证明免传内容),拿它当"普通定稿"
+                //    用必然 400「缺少 nonce」—— 真机实测:新建一个 0 字节的 .bmp **永远传不上去**,
+                //    而且失败后任务行(24h TTL)一直占着这个名字,后续每次重试都 409
+                //    「同目录下已有一个正在上传的同名文件」,用户看到的就是"这个文件怎么都同步不了"。
+                //
+                // 正确做法:**发一个空体 PATCH**。服务端在 `newOffset >= DeclaredSize` 时定稿
+                //    (`uploadsvc.TUSService.Patch`),0 字节文件 `0 >= 0` 立即成立 ⇒ 正常定稿。
+                return await FinalizeExhaustedAsync(handle, offset, progress, ct).ConfigureAwait(false);
             }
 
             var chunk = new byte[read];
@@ -228,7 +249,53 @@ public sealed class TusUploader
             {
                 return new UploadResult { FileId = result.FileId, Version = result.Version, FinalizedInline = true };
             }
+            }
         }
+        catch (ApiException ex) when (IsHopeless(ex))
+        {
+            // **4xx(且非暂时性)说明这个任务已经没救了** —— 典型是内容被服务端拒(超长、名字/权限问题)。
+            // 必须在这里**取消任务**:不取消的话它会占着这个名字直到过期(默认 24h),
+            // 之后每一轮对账的重试都只会拿到 409「同目录下已有一个正在上传的同名文件」,
+            // 用户看到的是"这个文件怎么都同步不了"(真机实测:0 字节文件就是这样把名字锁死的)。
+            await CancelAsync(handle, ct).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>4xx 且非暂时性 = 重试同一个任务也不会成功,该取消而不是留着占名字。</summary>
+    private static bool IsHopeless(ApiException ex) =>
+        (int)ex.Status is >= 400 and < 500 && !ex.IsTransient;
+
+    /// <summary>
+    /// 内容已经发完、但服务端还没定稿时,用**空体 PATCH** 触发定稿(见调用点的说明)。
+    ///
+    /// 两种"发完了却没定稿"的情形要分开处理:
+    ///   · 本地内容与声明大小一致(含 0 字节)→ 空 PATCH **就是**定稿动作;
+    ///   · 本地内容比声明的小(文件在传输途中被改小了)→ 空 PATCH 不会定稿,
+    ///     这时**取消任务**并如实报错:留着它只会占住名字直到过期(默认 24h),
+    ///     让用户以为"这个文件再也传不上去了"。
+    /// </summary>
+    private async Task<UploadResult> FinalizeExhaustedAsync(
+        UploadHandle handle, long offset, IProgress<long>? progress, CancellationToken ct)
+    {
+        var head = await HeadAsync(handle, ct).ConfigureAwait(false);
+        if (head.Length is { } total && head.Offset < total)
+        {
+            await CancelAsync(handle, ct).ConfigureAwait(false);
+            throw new ApiException(HttpStatusCode.BadRequest, "local_shrank",
+                $"本地文件比创建上传任务时小:{head.Offset} < {total}(任务已取消,请重新同步)");
+        }
+
+        var final = await PatchChunkAsync(handle, Array.Empty<byte>(), head.Offset, ct, progress)
+            .ConfigureAwait(false);
+        if (final.FileId is null)
+        {
+            await CancelAsync(handle, ct).ConfigureAwait(false);
+            throw new ApiException(HttpStatusCode.BadRequest, "finalize_failed",
+                $"服务端未定稿(偏移 {final.Offset}/声明 {head.Length?.ToString() ?? "?"};任务已取消,请重新同步)");
+        }
+        progress?.Report(final.Offset);
+        return new UploadResult { FileId = final.FileId, Version = final.Version, FinalizedInline = false };
     }
 
     /// <summary>取消任务并即时释放预留额度(6.3:取消不等回收班车)。</summary>

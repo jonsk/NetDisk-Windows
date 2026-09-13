@@ -1221,6 +1221,39 @@ try
             }
         }
     }
+
+    // ------------------------------------------------ ⑰ 0 字节文件(用户实测报告的那条路径)
+    // 现象:新建一个 0 字节的 .bmp **永远传不上去**;日志里先是「上传失败 …:缺少 nonce」,
+    // 之后每一轮变成「上传失败 …:同目录下已有一个正在上传的同名文件」—— 名字被一个失败的旧任务占住了。
+    // 根因:0 字节文件在 TUS 流程里"第一次读就是 0 字节",客户端当时去调
+    // `POST /api/v1/upload/{id}/finish`,而那是**秒传(持物证明)专用**端点(契约里 nonce 必填)
+    // ⇒ 必然 400;失败后又不取消任务 ⇒ 名字被占 24 小时。
+    Console.WriteLine();
+    Console.WriteLine("— ⑰ 0 字节文件能同步(空体 PATCH 定稿)");
+    {
+        var zeroName = $"sync-check-{DateTime.Now:HHmmss}-zero.bin";
+        await using var host = new SyncHost(cfg, BuildTokenSession(), api, statePath: statePath, watchLocal: false);
+        await host.StartAsync();
+        await host.ReconcileAsync();
+
+        var zeroPath = Path.Combine(root, zeroName);
+        await File.WriteAllBytesAsync(zeroPath, Array.Empty<byte>());
+        await host.ReconcileAsync();
+
+        var remote = await files.FindByNameAsync(space.id, null, zeroName);
+        Check("⑰ 0 字节文件已上传到远端", remote is not null,
+            remote is null ? "远端没有它(0 字节文件传不上去 = 用户实测的那个缺陷)" : "");
+        Check("⑰ 远端大小 = 0", remote is not null && remote.size == 0, $"size={remote?.size}");
+        Check("⑰ 状态标为已同步(不是失败)",
+            host.Status.FirstOrDefault(s => s.RelativePath == zeroName)?.State == SyncState.InSync,
+            host.Status.FirstOrDefault(s => s.RelativePath == zeroName)?.Message ?? "(没有状态行)");
+
+        // 再对账一轮:确认 0 字节文件不会在后续轮次里退化成失败(用户看到的"怎么都同步不了")
+        await host.ReconcileAsync();
+        Check("⑰ 0 字节文件重复对账仍是已同步",
+            host.Status.FirstOrDefault(s => s.RelativePath == zeroName)?.State == SyncState.InSync,
+            host.Status.FirstOrDefault(s => s.RelativePath == zeroName)?.State.ToString() ?? "(缺状态)");
+    }
 }
 finally
 {
