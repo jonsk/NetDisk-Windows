@@ -65,6 +65,18 @@ public sealed record OnboardingPlan
 
     public PathBudgetReport? PathBudget { get; init; }
 
+    /// <summary>
+    /// 远端清单**拉到了,但一个条目都没有**(空空间/全新账号)。
+    ///
+    /// 为什么要单独记这一笔(实测缺陷,用户首次运行就撞上):`PathBudget.Check` 有一条刻意规则 ——
+    /// "没有样本不该被当成通过"(防止"其实没拉到清单就连上了")。可是**空空间本来就没有任何路径可检查**,
+    /// 于是那条规则会把"空空间"也判成不通过,首轮向导直接拒绝登录:
+    /// 「同步目录不可用:没有可检查的路径(尚未拉到远程清单?)」。
+    /// 病根不是那条规则(它对"清单非空但抽样为空"的调用方仍然正确),而是**这一层丢了信息**:
+    /// 向导知道清单是**成功拉到且为空**,所以才由计划把它记下来,让 <see cref="Validate"/> 区别对待。
+    /// </summary>
+    public bool RemoteTreeWasEmpty { get; init; }
+
     /// <summary>是否为只读浏览模式(客户端据此显示云朵图标 + 托盘常驻提示)。</summary>
     public bool IsReadOnlyBrowse => Choice == FirstSyncChoice.StructureOnly;
 
@@ -90,8 +102,9 @@ public sealed record OnboardingPlan
             // 而界面上一切正常 —— 必须当场拦下。
             problems.Add("选择了限定子树,但没有勾选任何子树");
         }
-        if (PathBudget is { Ok: false })
+        if (PathBudget is { Ok: false } && !RemoteTreeWasEmpty)
         {
+            // 空清单例外见 RemoteTreeWasEmpty 的说明:没有路径可查 ≠ 路径超限。
             problems.Add(PathBudget.Summary + (PathBudget.Suggestion is null ? "" : $" → {PathBudget.Suggestion}"));
         }
         return problems;
@@ -151,6 +164,9 @@ public sealed class OnboardingWizard
             Transfer = transfer ?? DefaultTransferFor(choice),
             Estimate = estimate,
             PathBudget = budget,
+            // 清单是**成功拉到**的:到这里才敢说"空"是"真的空"。拉取失败会在上一行之前抛异常,
+            // 根本走不到这里 —— 这正是能区分"空空间"与"没拉到清单"的原因。
+            RemoteTreeWasEmpty = tree.Count == 0,
         };
     }
 

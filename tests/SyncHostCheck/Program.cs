@@ -22,6 +22,7 @@ using NetDisk.ClientCore;
 using NetDisk.SyncEngine;
 using NetDisk.SyncEngine.Files;
 using NetDisk.SyncEngine.Host;
+using NetDisk.SyncEngine.Onboarding;
 using NetDisk.Transport;
 
 var baseUrl = Environment.GetEnvironmentVariable("NETDISK_E2E_BASE") ?? "http://127.0.0.1:8080";
@@ -118,6 +119,27 @@ try
     }
 
     var remoteNames = new HashSet<string>(StringComparer.Ordinal);
+
+    // ------------------------------------------------ ⑧ 首次运行向导(用真实清单)
+    // 放在**最前面**:此刻远端只有本用例自己造的东西(通常就是空的),所以这一节能跑到
+    // 用户实测撞上的那条路径 —— 空清单建计划。
+    // 「登录并开始同步」真的会走:拉远端清单 → 建计划 → 校验;空空间曾被误拦:
+    // 「同步目录不可用:没有可检查的路径(尚未拉到远程清单?)」,永远进不去。
+    // 只测"假清单"发现不了它(那段逻辑在计划层),所以必须有真机断言。
+    Console.WriteLine();
+    Console.WriteLine("— ⑧ 首次运行向导(真实清单)");
+    {
+        var tree = await files.CollectTreeAsync(space.id, null);
+        var wizard = new OnboardingWizard((_, _) => Task.FromResult<IReadOnlyList<RemoteEntry>>(tree));
+        var plan = await wizard.BuildAsync(FirstSyncChoice.FullWithThrottle, root);
+        var problems = plan.Validate();
+        Console.WriteLine($"    真实清单 {tree.Count} 条;RemoteTreeWasEmpty={plan.RemoteTreeWasEmpty}");
+        Check($"⑧ 真实清单({tree.Count} 条,含 0 条)能过首次运行校验", problems.Count == 0,
+            problems.Count == 0 ? "" : $"被拦下:{string.Join("|", problems)}");
+        Check("⑧ 空清单被正确标记(登录页据此显示「服务器上还没有任何文件」)",
+            plan.RemoteTreeWasEmpty == (tree.Count == 0),
+            $"tree={tree.Count} RemoteTreeWasEmpty={plan.RemoteTreeWasEmpty}");
+    }
 
     // ---------------------------------------------------------------- ② 本地新文件 → 自动上传
     Console.WriteLine();

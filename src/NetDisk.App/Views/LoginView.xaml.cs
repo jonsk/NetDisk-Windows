@@ -110,9 +110,14 @@ public partial class LoginView : System.Windows.Controls.UserControl
                 }
 
                 var estimate = plan.Estimate;
+                // 空空间要给一句人话:否则"0 个文件、0 个目录"看起来像出错了
+                // (服务端没有任何文件是完全正常的 —— 全新账号、或刚被清空的空间)。
+                var remoteLine = plan.RemoteTreeWasEmpty
+                    ? "服务器上还没有任何文件(这是一个空空间,正常):首次同步会把这个目录里的文件上传上去。"
+                    : $"服务器上有 {estimate?.FileCount ?? 0} 个文件、{estimate?.DirectoryCount ?? 0} 个目录," +
+                      $"合计约 {FormatSize(estimate?.TotalBytes ?? 0)}。";
                 var summary =
-                    $"服务器上有 {estimate?.FileCount ?? 0} 个文件、{estimate?.DirectoryCount ?? 0} 个目录," +
-                    $"合计约 {FormatSize(estimate?.TotalBytes ?? 0)}。\n\n" +
+                    remoteLine + "\n\n" +
                     $"同步目录:{root}\n" +
                     "(首次同步会把服务器上的文件下载到该目录,并把该目录里的文件上传到服务器。)";
                 OnboardingText.Text = summary;

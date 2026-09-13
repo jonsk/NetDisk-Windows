@@ -25,6 +25,7 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑩ 落骨架幂等:重复应用不重复写、不重复建", CheckIdempotentAsync),
     ("⑪ 落骨架不碰本地既有真实文件(切模式不是丢数据)", CheckKeepsExistingFilesAsync),
     ("⑫ 计划校验:空根 / 并发 0 / 限定子树却没勾选 都被拒绝", CheckValidationAsync),
+    ("⑬ 空远端空间可完成首次运行(且超限清单仍被拦下)", CheckEmptyRemoteTreeIsAllowedAsync),
 };
 
 var failed = 0;
@@ -142,6 +143,43 @@ static async Task CheckNoProbeNotOkAsync()
     var plan = await empty.BuildAsync(FirstSyncChoice.FullWithThrottle, @"D:\NetDisk");
     Assert(plan.PathBudget is { Ok: false }, "没有样本时必须判为不通过(而不是默认放行)");
     Assert(plan.PathBudget!.Problems.Any(p => p.Contains("没有可检查的路径")), "应说明原因");
+}
+
+/// <summary>
+/// **空远端空间必须能完成首次运行**(2026-09-13 实测缺陷,用户装完 MSI 第一次登录就撞上)。
+///
+/// 现象:登录页弹「同步目录不可用:没有可检查的路径(尚未拉到远程清单?)」,永远进不去。
+/// 病根:`PathBudget.Check` 有一条刻意规则"没有样本不该被当成通过"(防"其实没拉到清单"),
+/// 而**空空间本来就没有任何路径可查**,于是那条规则把"空空间"也判成不通过。
+/// 修法不是在 `PathBudget` 上开口子(它对"清单非空但抽样为空"的调用方仍然正确),
+/// 而是在**计划层**记下"清单拉到了且为空"(<see cref="OnboardingPlan.RemoteTreeWasEmpty"/>)。
+///
+/// 本节同时钉住两点,防止修得过头:
+///   ① 空空间:计划可放行(Validate 为空),但 `PathBudget.Ok` 仍为 false(⑥ 的语义不变);
+///   ② 对照:非空但路径超限的树**仍然被拦下**(不是把校验整体关掉)。
+/// </summary>
+static async Task CheckEmptyRemoteTreeIsAllowedAsync()
+{
+    var empty = new OnboardingWizard((_, _) => Task.FromResult<IReadOnlyList<RemoteEntry>>(Array.Empty<RemoteEntry>()));
+    var plan = await empty.BuildAsync(FirstSyncChoice.FullWithThrottle, @"D:\NetDisk");
+
+    Assert(plan.RemoteTreeWasEmpty, "向导必须记下「清单拉到了但为空」");
+    Assert(plan.Estimate is { FileCount: 0, DirectoryCount: 0 }, "空空间的预估应为 0/0");
+    Assert(plan.PathBudget is { Ok: false }, "「没有样本不 Ok」这条规则不该被改掉(⑥ 仍要成立)");
+    var problems = plan.Validate();
+    Assert(problems.Count == 0,
+        $"空空间必须能完成首次运行,实际被拦下:{string.Join("|", problems)}");
+
+    // 对照:非空且超限的树仍然被拦下 —— 证明不是把校验关掉了
+    var longName = new string('报', 100) + ".txt";
+    var over = new OnboardingWizard((_, _) => Task.FromResult<IReadOnlyList<RemoteEntry>>(new[]
+    {
+        new RemoteEntry("docs/" + longName, false, 10, 1),
+    }));
+    var overPlan = await over.BuildAsync(FirstSyncChoice.FullWithThrottle, @"D:\NetDisk");
+    Assert(!overPlan.RemoteTreeWasEmpty, "非空清单不该被标记成空");
+    Assert(overPlan.Validate().Any(p => p.Contains("超过上限")),
+        "对照位:路径超限的清单仍必须被拦下");
 }
 
 static Task CheckStructureOnlySkeletonAsync()
