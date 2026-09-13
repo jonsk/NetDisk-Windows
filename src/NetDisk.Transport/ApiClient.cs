@@ -363,6 +363,18 @@ public sealed class ApiClient
 
     private bool ShouldRetry(HttpStatusCode status, bool idempotent)
     {
+        // **429 是例外,而且必须按例外处理**:
+        //   · 它由限流中间件在**进 handler 之前**返回 —— 请求根本没被执行,
+        //     所以"重试会不会建出两份东西"这个顾虑在这里不成立;
+        //   · 真机实测:客户端建目录/传文件时会被 `file_write`/`default` 档位打回 429
+        //     (部署配置里没有 file_write,回落到 default 20/s,600/min),而
+        //     `POST /upload/create` 是非幂等 → 原先**不重试**,表现为"文件永远传不上去、
+        //     状态停在待上传"(且日志里没有任何痕迹,见 SyncHost.OnQueueFailed)。
+        // 其它 5xx 仍然只在幂等/显式开关下重试:那些状态**可能已经执行过**了。
+        if (status == HttpStatusCode.TooManyRequests)
+        {
+            return true;
+        }
         if (!idempotent && !_retry.RetryNonIdempotent)
         {
             return false;
