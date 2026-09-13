@@ -33,15 +33,20 @@ function Check([string]$label, [bool]$ok, [string]$detail) {
 Write-Host "== 0) 清基线:先卸载任何已注册的 NetDisk 产品 =="
 # 为什么必须先清:开发期反复安装会留下多份注册(同版本不同 ProductCode),
 # 那种环境下的"零残留"测量毫无意义 —— 卸载只摘掉其中一层(实测踩到过)。
-$userData = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Installer\UserData'
+# 枚举已安装的 NetDisk 产品(返回 ProductCode)。
+#
+# ⚠ 这里换过两次实现,踩到的坑值得留着:
+#   ① 最初用注册表 `HKCU:\...\Installer\UserData\<SID>\Products` —— **本机那个键根本不存在**,
+#      枚举永远返回空:清基线变成空操作,而"基线干净"断言**永远真空通过**。
+#      实测后果:升级演练里残留的新版本挡住了要装的旧版(MSI 拒绝降级),演练从第一步就错。
+#   ② 改用 Windows Installer COM 的 `Installer.Products` —— **perUser 安装的产品不在里面**
+#      (它返回 0 项)。perUser 是自动更新免 UAC 的前提,恰恰最需要能被枚举到。
+#   ③ 最终用 `Get-Package -ProviderName msi`(PackageManagement 的 msi 提供程序):
+#      它列出了 Name=NetDisk / Version=1.0.160,ProductCode 就是 FastPackageReference。
 function Get-NetDiskProductCodes {
-    @(Get-ChildItem $userData -ErrorAction SilentlyContinue | ForEach-Object {
-        $sid = $_.PSChildName
-        Get-ChildItem "$userData\$sid\Products" -ErrorAction SilentlyContinue | ForEach-Object {
-            $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-            if ($p.ProductName -like '*NetDisk*') { $_.PSChildName }
-        }
-    })
+    @(Get-Package -ProviderName msi -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '*NetDisk*' } |
+        ForEach-Object { "$($_.FastPackageReference)" })
 }
 $existing = Get-NetDiskProductCodes
 foreach ($code in $existing) {

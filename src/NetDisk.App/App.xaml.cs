@@ -32,6 +32,16 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
 
+        // ⓪ 无界面模式(自动更新用)。必须在任何 UI 之前处理:
+        //    · `--self-check`   = "装上去的这个客户端能活吗"(更新器验活用;退出码 0 = 能活)
+        //    · `--apply-update` = 更新器本体(客户端把自己复制到临时目录后用这个参数运行副本)
+        //    两者都不弹窗口、不建托盘 —— 升级过程里冒出一个窗口会被用户当成"程序坏了"。
+        if (RunHeadlessMode(e.Args, out var exitCode))
+        {
+            Shutdown(exitCode);
+            return;
+        }
+
         // ① 线程纪律的"起誓点"。放在最前面:在它之前发生的任何 UI 触碰都应该被记为
         //    "探测器未启用"违规,而不是被悄悄放过。
         ThreadDiscipline.MarkUiThread();
@@ -85,6 +95,118 @@ public partial class App : System.Windows.Application
         typeof(App).Assembly.GetName().Version?.ToString()
         ?? System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString()
         ?? "unknown";
+
+    /// <summary>
+    /// 无界面模式(**自动更新的两半**)。返回 true = 已处理完毕,调用方应立即按 exitCode 退出。
+    ///
+    /// 为什么放在客户端里而不是另做一个 updater.exe:产品要求是**单文件发布**,
+    /// MSI 载荷校验收紧到"恰好一个文件"(`verify-msi.ps1` 会断言)。所以更新器 = 客户端自己:
+    /// 主进程把 exe 复制到临时目录,用 `--apply-update` 拉起**那份副本**,然后自己退出;
+    /// 副本去跑 msiexec(它覆盖的是安装目录里的文件,不是自己),装完验活/必要时回滚。
+    ///
+    /// 退出码(脚本与真机演练按它判定,别只看日志):
+    ///   `--self-check`  : 0 能活 / 2 有问题(原因写进日志与 stdout)
+    ///   `--apply-update`: 0 升级成功 / 2 安装失败 / 3 验活失败已回滚 / 4 验活失败且回滚失败 / 5 参数不合法
+    /// </summary>
+    private static bool RunHeadlessMode(string[] args, out int exitCode)
+    {
+        exitCode = 0;
+        if (args.Any(a => string.Equals(a, "--self-check", StringComparison.OrdinalIgnoreCase)))
+        {
+            exitCode = SelfCheck();
+            return true;
+        }
+        if (args.Any(a => string.Equals(a, "--apply-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            // ⚠ **必须在线程池上跑**:OnStartup 跑在 UI 线程上,而 WPF 此时已经装好了
+            //    SynchronizationContext。若直接在 UI 线程上 `GetAwaiter().GetResult()`,
+            //    异步方法里任何一个 await 的续体都会被 Post 回**已被我们阻塞的** UI 线程 ——
+            //    经典死锁。真机演练实测:更新器把新版装好、验活也通过了(self-check 日志两行都在),
+            //    然后**卡在 await 边界上 50 分钟不退出**,演练看起来像"MSI 装得慢"。
+            //    用 Task.Run 把整段异步逻辑交给线程池:那里没有 UI 上下文,续体不再排回 UI 线程。
+            exitCode = Task.Run(() => ApplyUpdateAsync(args)).GetAwaiter().GetResult();
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 装上去的这个客户端**能活吗**:配置能读/能建、数据目录可写、日志可写、令牌密文可解。
+    /// 更新器在新版装好后调用它 —— 这是"新版起不来就回滚"的判据,不能靠猜。
+    /// </summary>
+    private static int SelfCheck()
+    {
+        try
+        {
+            var cfgPath = ClientPaths.ConfigPath;
+            var cfg = ClientConfig.Load();      // 不存在时会给出默认值(首次运行语义)
+            AppLog.Enabled = cfg.Logging;
+            AppLog.Write("update", $"self-check:版本={BuildVersion()} 数据目录={ClientPaths.DataDirectory} 配置={cfgPath}");
+
+            // 数据目录必须可写(状态库与令牌都要写在这里;只读目录会让客户端"启动就报错")
+            Directory.CreateDirectory(ClientPaths.DataDirectory);
+            var probe = Path.Combine(ClientPaths.DataDirectory, ".self-check-write");
+            File.WriteAllText(probe, "ok");
+            File.Delete(probe);
+
+            AppLog.Write("update", "self-check:通过(配置可读、数据目录可写、日志可写)");
+            Console.WriteLine($"self-check ok: {BuildVersion()} @ {ClientPaths.DataDirectory}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                AppLog.Write("update", $"self-check:失败 {ex.GetType().Name}: {ex.Message}");
+            }
+            catch (Exception)
+            {
+                // 日志都写不进去时只能靠退出码
+            }
+            Console.Error.WriteLine("self-check failed: " + ex.Message);
+            return 2;
+        }
+    }
+
+    /// <summary>`--apply-update --msi &lt;p&gt; --client &lt;exe&gt; [--previous-msi &lt;p&gt;] [--no-relaunch] [--visible]`</summary>
+    private static async Task<int> ApplyUpdateAsync(string[] args)
+    {
+        string? Arg(string name)
+        {
+            var i = Array.FindIndex(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
+            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        }
+
+        var msi = Arg("--msi");
+        var client = Arg("--client") ?? Environment.ProcessPath ?? "";
+        var previous = Arg("--previous-msi");
+        if (string.IsNullOrWhiteSpace(msi) || string.IsNullOrWhiteSpace(client))
+        {
+            Console.Error.WriteLine("用法:--apply-update --msi <安装包> --client <客户端 exe> [--previous-msi <旧包>] [--no-relaunch] [--visible]");
+            return 5;
+        }
+
+        var options = new NetDisk.SyncEngine.Update.UpdaterOptions(
+            msi,
+            client,
+            Silent: !args.Any(a => string.Equals(a, "--visible", StringComparison.OrdinalIgnoreCase)),
+            RelaunchClient: !args.Any(a => string.Equals(a, "--no-relaunch", StringComparison.OrdinalIgnoreCase)),
+            PreviousMsiPath: string.IsNullOrWhiteSpace(previous) ? null : previous);
+
+        var outcome = await new NetDisk.SyncEngine.Update.UpdaterRunner(
+            new NetDisk.SyncEngine.Update.ProcessRunner()).RunAsync(options);
+        AppLog.Write("update", $"更新器:{outcome.Kind} {outcome.Reason}(msiexec={outcome.InstallerExitCode} 已拉起客户端={outcome.Relaunched})");
+        Console.WriteLine($"{outcome.Kind}: {outcome.Reason}");
+        return outcome.Kind switch
+        {
+            NetDisk.SyncEngine.Update.UpdaterOutcomeKind.Upgraded => 0,
+            NetDisk.SyncEngine.Update.UpdaterOutcomeKind.InstallFailed => 2,
+            NetDisk.SyncEngine.Update.UpdaterOutcomeKind.HealthCheckFailedRolledBack => 3,
+            NetDisk.SyncEngine.Update.UpdaterOutcomeKind.HealthCheckFailedRollbackFailed => 4,
+            NetDisk.SyncEngine.Update.UpdaterOutcomeKind.HealthCheckFailed => 6,
+            _ => 4,
+        };
+    }
 
     /// <summary>
     /// soak 的**优雅停止通道**(NETDISK_SOAK_STOP_FILE)。
