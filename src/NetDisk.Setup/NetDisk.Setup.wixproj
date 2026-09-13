@@ -17,16 +17,34 @@
   <PropertyGroup>
     <OutputName>NetDisk</OutputName>
     <OutputType>Package</OutputType>
-    <!-- 版本与 App 一致(ADR-3:桌面制品版本独立递增,不随仓库 tag) -->
-    <DefineConstants>ProductVersion=1.0.0</DefineConstants>
+    <!--
+      版本:MSI 与 **exe 的文件版本**都由这一个入口驱动(`ProductVersion`)。
+      为什么必须让每次构建的版本都不同(2026-09-13 实测缺陷):
+        Windows Installer 拷文件时按"文件版本更新"规则决定要不要覆盖 ——
+        旧包与新包的 exe 都是 1.0.0.0 时,日志里会出现
+        `File: ...NetDisk.App.exe; Won't Overwrite; Existing file is of an equal or newer version`,
+        **装完还是旧程序**,而安装"成功"、没有报错。真机复现过。
+      默认值 1.0.0 只用于临时手编;正式出包由 `desktop/scripts/verify-msi.ps1` 传入
+      `-p:ProductVersion=1.0.<git 提交数>`(单调递增、可复现),脚本随后会**断言装上去的 exe 版本号一致**。
+    -->
+    <!-- 默认版本也要**每次都不同**(见上面的说明):yyMM + ddHH,两部分都 ≤ 65535
+         (FileVersion 的每一段是 UInt16,写成 yyMMdd 会溢出)。同一小时内两次手编会同版本,
+         正式出包由脚本传 git 提交数,不受此限。 -->
+    <NetDiskStampMonth>$([System.DateTime]::UtcNow.ToString("yyMM"))</NetDiskStampMonth>
+    <NetDiskStampDayHour>$([System.DateTime]::UtcNow.ToString("ddHH"))</NetDiskStampDayHour>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.0.$(NetDiskStampMonth).$(NetDiskStampDayHour)</ProductVersion>
+    <DefineConstants>ProductVersion=$(ProductVersion)</DefineConstants>
 
-    <!-- perUser-only 包(R-26)按官方建议抑制这三条 per-machine 前提的 ICE -->
+    <!-- perUser-only 包(R-26)按官方建议抑制这几条 ICE -->
     <!--
       ICE60:自包含产物里有些 DLL/EXE 带版本资源但没有 Language 列。该列只在**多语言**
       安装里参与"按语言选文件",本项目是单语言包(而且 `Files` 集合并不支持逐文件给
       Language),所以按官方建议抑制 —— 与 ICE38/64/91 一样,抑制理由写在 Product.wxs 里。
+      ICE61:开着 `AllowSameVersionUpgrades="yes"`(见 Product.wxs)时,生成的 Upgrade 表
+      上界就等于当前版本,ICE61 必然报"The Maximum version is not less than the current product"。
+      那正是我们要的行为(开发期同版本不同 ProductCode 必须能互相替换),所以按官方建议抑制。
     -->
-    <SuppressIces>ICE38;ICE60;ICE64;ICE91</SuppressIces>
+    <SuppressIces>ICE38;ICE60;ICE61;ICE64;ICE91</SuppressIces>
 
     <!-- 打包前自动发布(设 false 可跳过,仅用于快速迭代;产物缺失时打包会直接失败) -->
     <PublishBeforePackaging Condition="'$(PublishBeforePackaging)' == ''">true</PublishBeforePackaging>
@@ -52,7 +70,7 @@
     <!-- 单文件发布(2026-09-13 产品要求):载荷应当是**恰好一个** NetDisk.App.exe。
          属性在 App.csproj 里已默认为单文件,这里再显式传一遍 —— 打包链上"依赖别处默认值"
          最容易在别人改了工程属性后静默变回一堆散文件(而 MSI 照样能装上,只是不再单文件)。 -->
-    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)..\NetDisk.App\NetDisk.App.csproj&quot; -c $(Configuration) -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o &quot;$(MSBuildThisFileDirectory)publish&quot; --nologo"
+    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)..\NetDisk.App\NetDisk.App.csproj&quot; -c $(Configuration) -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$(ProductVersion) -o &quot;$(MSBuildThisFileDirectory)publish&quot; --nologo"
           StandardOutputImportance="low" />
   </Target>
 

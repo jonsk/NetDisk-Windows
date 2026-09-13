@@ -30,8 +30,37 @@ function Check([string]$label, [bool]$ok, [string]$detail) {
     else { Write-Host ("FAIL  {0,-44} {1}" -f $label, $detail) -ForegroundColor Red; $script:bad++ }
 }
 
+Write-Host "== 0) 清基线:先卸载任何已注册的 NetDisk 产品 =="
+# 为什么必须先清:开发期反复安装会留下多份注册(同版本不同 ProductCode),
+# 那种环境下的"零残留"测量毫无意义 —— 卸载只摘掉其中一层(实测踩到过)。
+$userData = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Installer\UserData'
+function Get-NetDiskProductCodes {
+    @(Get-ChildItem $userData -ErrorAction SilentlyContinue | ForEach-Object {
+        $sid = $_.PSChildName
+        Get-ChildItem "$userData\$sid\Products" -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($p.ProductName -like '*NetDisk*') { $_.PSChildName }
+        }
+    })
+}
+$existing = Get-NetDiskProductCodes
+foreach ($code in $existing) {
+    Start-Process msiexec.exe -ArgumentList "/x $code /qn" -Wait | Out-Null
+    Write-Host "  已卸载旧产品 $code"
+}
+Check "基线干净(没有已注册的 NetDisk 产品)" ((Get-NetDiskProductCodes).Count -eq 0) `
+    "清掉的旧注册数=$($existing.Count)"
+
+# 版本号:1.0.<git 提交数>(单调递增、可复现)。**必须每次构建都不同** ——
+# 否则 MSI 会因为"文件版本不更新"拒绝覆盖旧 exe:实测日志 `Won't Overwrite; Existing file is of an equal or newer version`,
+# 表现是安装成功、没有任何报错,但用户装的还是**旧程序**。
+$gitCount = (& git -C $root rev-list --count HEAD 2>$null)
+if (-not $gitCount) { $gitCount = (Get-Date -Format 'yyMMddHHmm') }
+$version = "1.0.$gitCount"
+Write-Host "本次构建版本 = $version"
+
 Write-Host "== 1) 打包(先发布再打包;载荷是真实产物,不是陈旧副本)=="
-$build = & dotnet build (Join-Path $root 'src\NetDisk.Setup\NetDisk.Setup.wixproj') -c Release --nologo 2>&1
+$build = & dotnet build (Join-Path $root 'src\NetDisk.Setup\NetDisk.Setup.wixproj') -c Release --nologo "-p:ProductVersion=$version" 2>&1
 $warn = (($build | Select-String -Pattern 'warning|警告').Count)
 Check "打包成功且 0 警告" ($LASTEXITCODE -eq 0 -and $warn -le 1) "exit=$LASTEXITCODE 警告=$warn"
 Check "MSI 产物存在" (Test-Path $msi) ("{0:N2} MB" -f ((Get-Item $msi).Length / 1MB))
@@ -49,6 +78,12 @@ $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v `"$log`"" -Wa
 Check "静默安装成功(perUser,未提权)" ($p.ExitCode -eq 0) "exit=$($p.ExitCode)"
 $exe = Join-Path $install 'NetDisk.App.exe'
 Check "主程序已落地" (Test-Path $exe) $exe
+# **装上去的必须是这一版**(这条断言专治"装完还是旧程序"):
+# MSI 默认按"文件版本更新"决定是否覆盖,版本号不变时会静默保留旧 exe ——
+# 安装成功、零报错,用户却跑着上一版。这里直接比文件版本。
+$installedVer = if (Test-Path $exe) { (Get-Item $exe).VersionInfo.FileVersion } else { '' }
+Check "装上去的 exe 就是本次构建的版本" ($installedVer -like "*$version*") `
+    "期望含 $version,实际 '$installedVer'"
 $installed = @(Get-ChildItem $install -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -notin @('client.json', 'tokens.bin', 'state.db') -and $_.DirectoryName -notlike '*\logs*' })
 Check "安装目录里只有程序本体(单文件)" ($installed.Count -eq 1) "files=$($installed.Count)"

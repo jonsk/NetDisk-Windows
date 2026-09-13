@@ -34,7 +34,15 @@
            Compressed="yes"
            Codepage="65001">
 
-    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的 NetDisk,请先卸载。" />
+    <!--
+      AllowSameVersionUpgrades="yes"(2026-09-13 实测缺陷修复):
+      开发期每次构建都是同一个 ProductVersion 但**不同的 ProductCode**。默认的 MajorUpgrade
+      只清理"版本更低"的产品,同版本会被当成"另一个产品",于是反复安装会**叠加**多份注册 ——
+      卸载只摘掉一层,文件/快捷方式/HKCU 登记留在原地(实测:卸载"成功"却什么都不删)。
+      打开它之后,同版本的旧产品会在安装时被正确移除。
+    -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="已安装更新版本的 NetDisk,请先卸载。" />
     <MediaTemplate EmbedCab="yes" />
 
     <StandardDirectory Id="LocalAppDataFolder">
