@@ -20,6 +20,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using NetDisk.Transport;
 
+using NetDisk.SyncEngine.Host;
+
 namespace NetDisk.SyncEngine;
 
 /// <summary>DPAPI 加密的令牌文件(CurrentUser 作用域 + 固定附加熵)。</summary>
@@ -42,17 +44,19 @@ public sealed class DpapiTokenStore : ITokenStore
         _path = path ?? DefaultPath();
     }
 
-    /// <summary>令牌文件路径(默认 <c>%LOCALAPPDATA%\NetDisk\auth.bin</c>)。</summary>
+    /// <summary>令牌文件路径(默认与配置同目录:<c>&lt;程序目录&gt;\tokens.bin</c>)。</summary>
     public string Path => _path;
 
-    /// <summary>默认路径。放在 LOCALAPPDATA(而不是 Roaming):令牌是机器本地的,
-    /// 漫游配置会让密文跟着用户到另一台机器上 —— 那里 DPAPI 解不开,表现为莫名其妙的"未登录"。</summary>
-    public static string DefaultPath()
-    {
-        var dir = System.IO.Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NetDisk");
-        return System.IO.Path.Combine(dir, "auth.bin");
-    }
+    /// <summary>
+    /// 默认路径:与配置/状态库同目录(见 <see cref="ClientPaths"/>),即程序所在目录。
+    ///
+    /// 早前放在 LOCALAPPDATA 的理由是"令牌是机器本地的,别跟着漫游走"。单文件发布后
+    /// 统一到程序目录:程序目录本身通常也在本机(MSI 是 perUser 安装),而**配置与令牌分家**
+    /// 才是真麻烦(用户看到"配置在、登录态没了",无从解释)。漫游目录的问题依然不存在:
+    /// 我们不再用 Roaming,只可能落到 %APPDATA%(那是回退),不会跨机器同步 DPAPI 密文
+    /// —— 密文解不开时 <see cref="LoadAsync"/> 会当作未登录并要求重新登录。
+    /// </summary>
+    public static string DefaultPath() => ClientPaths.TokenPath;
 
     public ValueTask<TokenSet?> LoadAsync(CancellationToken ct = default)
     {

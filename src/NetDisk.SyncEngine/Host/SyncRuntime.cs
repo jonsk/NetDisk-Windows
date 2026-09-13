@@ -48,11 +48,7 @@ public sealed class SyncRuntime : IAsyncDisposable
     public IReadOnlyList<(DateTimeOffset At, string Message)> RecentNotices => _notices.ToArray();
 
     /// <summary>令牌密文文件(与 client.json 同目录,DPAPI 加密,绝不含口令)。</summary>
-    public static string DefaultTokenPath()
-    {
-        var dir = Path.GetDirectoryName(ClientConfig.DefaultPath())!;
-        return Path.Combine(dir, "tokens.bin");
-    }
+    public static string DefaultTokenPath() => ClientPaths.TokenPath;
 
     /// <summary>
     /// 用**已保存的令牌**建运行时(启动时用:用户不需要每天重输口令)。

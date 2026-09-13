@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using NetDisk.App.Notify;
 using NetDisk.SyncEngine.Diag;
+using NetDisk.SyncEngine.Host;
 using NetDisk.SyncEngine.Notify;
 
 namespace NetDisk.App;
@@ -42,12 +43,48 @@ public partial class App : System.Windows.Application
         _notifications = new NotificationCenter();
         _tray = new TrayNotifier(_notifications);
 
+        // ⑤ 数据文件与日志(2026-09-13 产品要求:单文件发布 + 配置放程序目录 + 日志默认开)
+        //
+        // 首次运行在这里**生成配置文件**:不这么做的话,用户装完程序找不到任何"配置在哪"的线索
+        // (以前只能靠文档说"去 %APPDATA% 找"),而"程序目录里就有 client.json"是自解释的。
+        var cfgPath = ClientConfig.DefaultPath();
+        var firstRun = !File.Exists(cfgPath);
+        var cfg = ClientConfig.Load();
+        if (firstRun)
+        {
+            cfg.Save();
+        }
+        AppLog.Enabled = cfg.Logging;
+        AppLog.WriteSessionHeader(BuildVersion(), cfgPath, cfg);
+        if (firstRun)
+        {
+            AppLog.Write("app", $"首次运行:已生成配置文件 {cfgPath}");
+        }
+
+        // 未处理异常必须落到日志里:客户端的崩溃现场在用户机器上,
+        // 而 WPF 的默认行为是弹一个框然后进程消失 —— 事后什么都查不到。
+        DispatcherUnhandledException += (_, e) =>
+            AppLog.Write("crash", $"UI 线程未处理异常: {e.Exception}");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            AppLog.Write("crash", $"未处理异常(进程即将结束): {e.ExceptionObject}");
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.Write("crash", $"未观察的任务异常: {e.Exception}");
+            e.SetObserved();
+        };
+
         // 主窗口在 App 里建(而不是 StartupUri),因为托盘/通知必须先于窗口存在:
         // 否则登录成功后引擎一冲突就没人接住那条通知(用户什么都看不到)。
         _main = new MainWindow(_notifications);
         MainWindow = _main;
         _main.Show();
     }
+
+    /// <summary>版本号(取程序集信息;与 MSI/自更新用的版本口径一致)。</summary>
+    private static string BuildVersion() =>
+        typeof(App).Assembly.GetName().Version?.ToString()
+        ?? System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+        ?? "unknown";
 
     /// <summary>
     /// soak 的**优雅停止通道**(NETDISK_SOAK_STOP_FILE)。

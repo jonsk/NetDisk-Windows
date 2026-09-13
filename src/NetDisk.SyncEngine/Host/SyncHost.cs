@@ -102,9 +102,8 @@ public sealed class SyncHost : IAsyncDisposable
         _identity = identityProvider ?? new Win32FileIdentityProvider();
 
         // 状态库路径**可注入**:一是让检查器能在临时目录里跑(不污染用户真实状态),
-        // 二是出问题时能把状态库挪到别处做实验,而不是去动用户的 %APPDATA%。
-        var resolvedState = statePath ?? Path.Combine(
-            Path.GetDirectoryName(ClientConfig.DefaultPath())!, "state.db");
+        // 二是出问题时能把状态库挪到别处做实验,而不是去动用户的程序目录。
+        var resolvedState = statePath ?? ClientPaths.StatePath;
         _store = StateStore.Open(resolvedState);
         _ledger = new ExpectedChangeLedger(clock: _clock, sink: new SqliteExpectedChangeSink(_store));
         _queue = new TransferQueue(clock: _clock);

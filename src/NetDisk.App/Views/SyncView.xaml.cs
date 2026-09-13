@@ -51,8 +51,78 @@ public partial class SyncView : System.Windows.Controls.UserControl
 
         AccountText.Text =
             $"账号 {runtime.Config.LastLogin} @ {runtime.Config.BaseUrl}    同步目录 {runtime.Config.SyncRoot}";
+
+        // 日志开关与路径:开关状态来自配置(默认开),切换即写回配置。
+        _suppressLogToggle = true;
+        LogToggle.IsChecked = runtime.Config.Logging;
+        _suppressLogToggle = false;
+        AppLog.Enabled = runtime.Config.Logging;
+        LogPathText.Text = $"日志文件:{AppLog.DefaultPath()}(默认启用;关掉后不再记录,便于对照复现)";
+
         Render(runtime.Host.Status);
+        LogStatusTransitions(runtime.Host.Status, initial: true);
     }
+
+    private bool _suppressLogToggle;
+
+    private void OnLogToggle(object sender, RoutedEventArgs e)
+    {
+        if (_suppressLogToggle || _runtime is null)
+        {
+            return;
+        }
+        var on = LogToggle.IsChecked == true;
+        AppLog.Enabled = on;
+        _runtime.Config.Logging = on;
+        _runtime.Config.Save();
+        LogPathText.Text = on
+            ? $"日志文件:{AppLog.DefaultPath()}(已启用)"
+            : $"日志已关闭(此前记录在 {AppLog.DefaultPath()};重新勾选即继续)";
+    }
+
+    private void OnOpenLog(object sender, RoutedEventArgs e)
+    {
+        var path = AppLog.DefaultPath();
+        try
+        {
+            if (!File.Exists(path))
+            {
+                System.Windows.MessageBox.Show($"日志还没生成:{path}\n(勾选「记录日志」后产生)");
+                return;
+            }
+            Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show("打开日志失败: " + ex.Message + "\n" + path);
+        }
+    }
+
+    /// <summary>
+    /// 把**每个文件的状态变化**写进日志(排查"这个文件为什么没同步"时最有用的一类信息)。
+    /// 只在状态/说明真的变化时记一行,否则每轮对账都会刷一遍同样的内容。
+    /// </summary>
+    private void LogStatusTransitions(IReadOnlyList<SyncEntryStatus> status, bool initial = false)
+    {
+        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in status.OrderBy(s => s.RelativePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var desc = $"{s.State} {s.Message}".Trim();
+            seen[s.RelativePath] = desc;
+            if (_lastLogged.TryGetValue(s.RelativePath, out var prev) && prev == desc)
+            {
+                continue;
+            }
+            AppLog.Write("file", $"{(initial ? "(初始)" : "")}{s.RelativePath} → {desc} v{s.Version}");
+        }
+        foreach (var gone in _lastLogged.Keys.Where(k => !seen.ContainsKey(k)).ToArray())
+        {
+            AppLog.Write("file", $"{gone} → (已不在列表:两端都不存在,或已删除)");
+        }
+        _lastLogged = seen;
+    }
+
+    private Dictionary<string, string> _lastLogged = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>解绑(退出/重新登录时):事件不摘掉会把旧界面一起"复活"。</summary>
     public void Detach()
@@ -69,7 +139,11 @@ public partial class SyncView : System.Windows.Controls.UserControl
     private void OnStatusChanged(IReadOnlyList<SyncEntryStatus> status)
     {
         // 后台线程 → UI 线程(见文件头 ①)
-        Dispatcher.BeginInvoke(new Action(() => Render(status)));
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            Render(status);
+            LogStatusTransitions(status);
+        }));
     }
 
     private void OnNotice(string message)

@@ -12,6 +12,7 @@
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
     <StackPanel Grid.Row="0">
@@ -23,6 +24,10 @@
       <Button x:Name="SyncNowButton" Padding="14,4" Content="立即同步" Click="OnSyncNow" />
       <Button x:Name="OpenFolderButton" Margin="8,0,0,0" Padding="14,4"
               Content="打开同步目录" Click="OnOpenFolder" />
+      <CheckBox x:Name="LogToggle" Margin="16,0,0,0" VerticalAlignment="Center"
+                Content="记录日志" Checked="OnLogToggle" Unchecked="OnLogToggle" />
+      <Button x:Name="OpenLogButton" Margin="8,0,0,0" Padding="14,4"
+              Content="打开日志" Click="OnOpenLog" />
       <TextBlock x:Name="NoticeText" Margin="14,0,0,0" VerticalAlignment="Center"
                  Foreground="#555" TextWrapping="Wrap" MaxWidth="560" />
     </StackPanel>
@@ -41,6 +46,7 @@
     <TextBlock Grid.Row="3" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap"
                Text="状态含义:已同步 = 两端一致;上传中/下载中 = 正在传输;冲突 = 两端都改过,本地版本已另存为冲突副本;错误 = 需要处理的失败。" />
     <TextBlock Grid.Row="4" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap"
-               Text="删除是双向同步的:在同步目录里删掉文件,服务器上也会删;另一端删掉的文件,这里也会删。删除在服务端不可恢复,且删掉的文件不会再出现在上面的列表里(可在 app.log 里查记录)。" />
+               Text="删除是双向同步的:在同步目录里删掉文件,服务器上也会删;另一端删掉的文件,这里也会删。删除在服务端不可恢复,且删掉的文件不会再出现在上面的列表里(可在日志里查记录)。" />
+    <TextBlock x:Name="LogPathText" Grid.Row="5" Margin="0,4,0,0" Foreground="#888" TextWrapping="Wrap" />
   </Grid>
 </UserControl>

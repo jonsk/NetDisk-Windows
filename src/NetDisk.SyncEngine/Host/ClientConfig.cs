@@ -44,16 +44,43 @@ public sealed class ClientConfig
     [JsonPropertyName("onboarded")]
     public bool Onboarded { get; set; }
 
+    /// <summary>
+    /// 是否记录日志(界面上的开关;**默认开**)。
+    ///
+    /// 默认开的理由:客户端出问题时现场在**用户机器上**,而"默认关掉"意味着
+    /// 用户来反馈时手上什么都没有,只能让他复现一次。日志是本地文件、不含口令与令牌,
+    /// 代价只有几十 KB —— 用"可能要用户复现一次"换这点磁盘不划算。
+    /// </summary>
+    [JsonPropertyName("logging")]
+    public bool Logging { get; set; } = true;
+
+    /// <summary>传输并发上限(1..16;默认 3,与引擎默认一致)。</summary>
+    [JsonPropertyName("max_concurrency")]
+    public int MaxConcurrency { get; set; } = 3;
+
+    /// <summary>上传限速(KB/s;0 = 不限速)。</summary>
+    [JsonPropertyName("upload_kbps")]
+    public int UploadKbps { get; set; }
+
+    /// <summary>下载限速(KB/s;0 = 不限速)。</summary>
+    [JsonPropertyName("download_kbps")]
+    public int DownloadKbps { get; set; }
+
+    /// <summary>面向用户的字段说明(首次运行生成配置时写进去,免得用户对着 JSON 猜)。</summary>
+    [JsonPropertyName("_说明")]
+    public string Help { get; set; } =
+        "base_url=服务器地址;sync_root=本地同步目录;max_concurrency=并发数(1-16);" +
+        "upload_kbps/download_kbps=限速(KB/s,0=不限);logging=是否记录日志(日志在 logs\\client.log);" +
+        "onboarded=是否已完成首次运行。删掉本文件会在下次启动时重新生成。";
+
     [JsonIgnore]
     public string Path { get; private set; } = "";
 
-    /// <summary>配置默认位置:<c>%APPDATA%\NetDisk\client.json</c>。</summary>
-    public static string DefaultPath()
-    {
-        var dir = System.IO.Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NetDisk");
-        return System.IO.Path.Combine(dir, "client.json");
-    }
+    /// <summary>
+    /// 配置默认位置:**程序所在目录**下的 <c>client.json</c>(该目录不可写时回退 %APPDATA%\NetDisk)。
+    /// 见 <see cref="ClientPaths"/>:位置只有一处定义,别处不许再拼路径。
+    /// </summary>
+    public static string DefaultPath() => ClientPaths.ConfigPath;
 
     /// <summary>读取配置;文件不存在或坏了都返回一个新对象(坏文件另存 .bak)。</summary>
     public static ClientConfig Load(string? path = null)
@@ -98,7 +125,14 @@ public sealed class ClientConfig
             Directory.CreateDirectory(dir);
         }
 
-        var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+        // UnsafeRelaxedJsonEscaping:这个文件是**给用户看的**(里面有 `_说明` 字段),
+        // 默认编码器会把中文写成 \u8BF4\u660E —— 用户打开一看全是转义码,等于没有说明。
+        // 文件本身就是 UTF-8,不转义是安全且正确的(不涉及 HTML/JS 注入场景)。
+        var json = JsonSerializer.Serialize(this, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        });
         var tmp = path + ".tmp";
         File.WriteAllText(tmp, json);
         // File.Replace/Move(overwrite) 保证读到的永远是完整文件

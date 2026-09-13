@@ -43,7 +43,16 @@
   <!-- 1 先发布、再打包 -->
   <Target Name="PublishAppBeforePackaging" BeforeTargets="BeforeBuild"
           Condition="'$(PublishBeforePackaging)' == 'true'">
-    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)..\NetDisk.App\NetDisk.App.csproj&quot; -c $(Configuration) -r win-x64 --self-contained true -o &quot;$(MSBuildThisFileDirectory)publish&quot; --nologo"
+    <!-- **先清空载荷目录**:`dotnet publish` 只覆盖它产出的文件,不会清理上一次的残留 ——
+         而 MSI 收的是 `publish\**`,于是任何残留在里面的东西都会**被打进安装包**。
+         这不是理论风险:实测从 publish 目录跑过一次 exe,它就地生成了 client.json/logs/state.db,
+         下一次打包就把这些**用户数据**打进了 MSI(被下面的单文件自检抓住)。
+         以前(几百个文件时)这种问题不会报错,只会让安装包里多带几个莫名其妙的文件。 -->
+    <RemoveDir Directories="$(MSBuildThisFileDirectory)publish" />
+    <!-- 单文件发布(2026-09-13 产品要求):载荷应当是**恰好一个** NetDisk.App.exe。
+         属性在 App.csproj 里已默认为单文件,这里再显式传一遍 —— 打包链上"依赖别处默认值"
+         最容易在别人改了工程属性后静默变回一堆散文件(而 MSI 照样能装上,只是不再单文件)。 -->
+    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)..\NetDisk.App\NetDisk.App.csproj&quot; -c $(Configuration) -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o &quot;$(MSBuildThisFileDirectory)publish&quot; --nologo"
           StandardOutputImportance="low" />
   </Target>
 
@@ -51,6 +60,14 @@
   <Target Name="VerifyPayload" BeforeTargets="BeforeBuild" DependsOnTargets="PublishAppBeforePackaging">
     <Error Condition="!Exists('$(MSBuildThisFileDirectory)publish\NetDisk.App.exe')"
            Text="打包前找不到 publish\NetDisk.App.exe —— 发布产物缺失(或发布失败)。拒绝打一个空壳 MSI。" />
+    <!-- 单文件自检:载荷里**只允许**有主程序。多出 .dll/.pdb 说明单文件属性没生效 ——
+         那种 MSI 装上去照样能跑,所以不加这条断言的话没人会发现"又变回一堆文件了"。 -->
+    <ItemGroup>
+      <UnexpectedPayload Include="$(MSBuildThisFileDirectory)publish\**\*.*"
+                         Exclude="$(MSBuildThisFileDirectory)publish\NetDisk.App.exe" />
+    </ItemGroup>
+    <Error Condition="'@(UnexpectedPayload)' != ''"
+           Text="单文件发布自检失败:载荷里除了 NetDisk.App.exe 还有 @(UnexpectedPayload->'%(Filename)%(Extension)', ', ')。请检查 PublishSingleFile / AllowedReferenceRelatedFileExtensions 是否被改掉。" />
   </Target>
 
   <!--
