@@ -22,6 +22,9 @@ public sealed class SyncRow
 {
     public required string File { get; init; }
 
+    /// <summary>引擎给的**真状态**(判定用;展示文案见 <see cref="StateText"/>)。</summary>
+    public required SyncState State { get; init; }
+
     public required string StateText { get; init; }
 
     public required string Message { get; init; }
@@ -32,7 +35,7 @@ public sealed class SyncRow
     public required long Version { get; init; }
 
     /// <summary>是否处于「冲突」态(界面据此决定"冲突处理"按钮能不能点)。</summary>
-    public bool IsConflict => StateText == "冲突";
+    public bool IsConflict => State == SyncState.Conflict;
 }
 
 // 基类写全限定名(与既有视图一致):UseWPF + UseWindowsForms 同时开启时
@@ -200,18 +203,35 @@ public partial class SyncView : System.Windows.Controls.UserControl
 
     private void Render(IReadOnlyList<SyncEntryStatus> status)
     {
+        // **刷新前先记住用户选中了哪一行**(按相对路径)。
+        //
+        // 为什么必须保住:这里每次状态更新都会 `_rows.Clear()` 重建列表,而 ListView 的
+        // 选中项是"对象引用" —— 重建之后选中就丢了。同步过程中状态更新非常频繁
+        // (每传一片、每次状态变化都会来一条),于是用户"明明点过那一行",再点冲突按钮
+        // 却被告诉「请先选中一行「冲突」」。实测反馈就是这么来的(用户报"解决冲突好像有问题")。
+        var previouslySelected = (StatusList.SelectedItem as SyncRow)?.File;
+
         _rows.Clear();
         foreach (var s in status.OrderBy(s => s.RelativePath, StringComparer.OrdinalIgnoreCase))
         {
             _rows.Add(new SyncRow
             {
                 File = s.RelativePath,
+                State = s.State, // 判定用**真状态**,不用展示文案(文案可改,判定不该跟着坏)
                 StateText = Describe(s.State),
                 Message = s.Message,
                 Version = s.Version,
                 ProgressText = s.ProgressPercent is { } p ? $"{p:F0}%" : "",
             });
         }
+
+        // 恢复选中(同一路径还在就选回它);没有可恢复的选中项时,**自动选中第一个冲突行** ——
+        // "有冲突"通常就意味着"我要处理它",让用户少猜一步。
+        var restore = previouslySelected is null
+            ? _rows.FirstOrDefault(r => r.IsConflict)
+            : _rows.FirstOrDefault(r => string.Equals(r.File, previouslySelected, StringComparison.OrdinalIgnoreCase));
+        StatusList.SelectedItem = restore; // 可能为 null(列表为空/没有冲突):下面统一刷新按钮状态
+        UpdateConflictActions();
 
         var synced = status.Count(s => s.State == SyncState.InSync);
         var uploading = status.Count(s => s.State == SyncState.PendingUpload);
@@ -225,6 +245,41 @@ public partial class SyncView : System.Windows.Controls.UserControl
             ? "尚无文件(同步目录为空,或还没完成第一次对账)"
             : $"共 {status.Count} 个文件:已同步 {synced} · 上传中 {uploading} · 下载中 {downloading} · 冲突 {conflicts} · 错误 {errors}"
               + (structureOnly > 0 ? $" · 仅结构(未搬内容){structureOnly}" : "");
+    }
+
+    private void OnStatusSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) =>
+        UpdateConflictActions();
+
+    /// <summary>
+    /// 按"当前选中了什么"决定三个冲突按钮能不能点,并把原因写在旁边。
+    ///
+    /// 为什么要有它(而不是等用户点了再报错):第一版按钮一直可点,点下去才知道"要先选中一行冲突" ——
+    /// 顺序靠猜;而"为什么不能点"比"点了被拒"更省一次往返。判定用引擎给的真状态
+    /// (`SyncState.Conflict`),不用展示文案 —— 文案是给人看的,判定不该跟着文案坏。
+    /// </summary>
+    private void UpdateConflictActions()
+    {
+        var row = StatusList.SelectedItem as SyncRow;
+        var enabled = row is { IsConflict: true };
+        KeepLocalButton.IsEnabled = enabled;
+        KeepRemoteButton.IsEnabled = enabled;
+        KeepBothButton.IsEnabled = enabled;
+
+        if (row is null)
+        {
+            ConflictHintText.Text = "先在下面的列表里点一行「冲突」";
+            return;
+        }
+        if (!row.IsConflict)
+        {
+            ConflictHintText.Text = $"选中的是「{row.StateText}」的 {row.File} —— 冲突处理只对「冲突」行生效";
+            return;
+        }
+        // 冲突行:顺带告诉用户"这次能不能自动处理"(引擎是否还记得本地副本在哪 —— 见 ResolveConflictAsync)
+        var resolvable = _runtime?.Host.CanResolveConflict(row.File) ?? false;
+        ConflictHintText.Text = resolvable
+            ? $"已选中冲突:{row.File}"
+            : $"已选中冲突:{row.File} —— 本地副本位置没有记录(可能来自上一次运行);点按钮会说明怎么手动处理";
     }
 
     /// <summary>状态 → 中文。纯展示映射:引擎加状态时这里必须跟着加(编译器会提醒)。</summary>

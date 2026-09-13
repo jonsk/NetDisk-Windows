@@ -1005,6 +1005,10 @@ try
         Check("⑭ 「以本地为准」后本地副本已合并删除", !File.Exists(copy1));
         Check("⑭ 「以本地为准」后不再是冲突态",
             rh.Status.FirstOrDefault(s => s.RelativePath == rel1)?.State != SyncState.Conflict);
+        // 界面上的"冲突处理"按钮按 CanResolveConflict 决定提示文案与可用性(见 SyncView.UpdateConflictActions):
+        // 解决完必须变成 false,否则用户会以为"还能再点一次"。
+        Check("⑭ 解决之后 CanResolveConflict 变 false(界面据此收起「可处理」提示)",
+            !rh.CanResolveConflict(rel1));
 
         // ② 以远端为准:远端那一版留在原路径,本地改动(副本)被删除 —— 用户明确选的"放弃本地"
         var (rel2, copy2) = await MakeConflictAsync(rh, $"{prefix}-remote.txt", "local-B", "remote-B");
@@ -1046,6 +1050,24 @@ try
         // ⑤ 解决不了的情形要**如实说**(不能显示成"已解决")
         Check("⑭ 没有任何副本记录的路径:CanResolveConflict = false",
             !rh.CanResolveConflict($"{prefix}-never-conflicted.txt"));
+
+        // ⑤b **跨实例**(= 客户端重启过)的冲突:本地副本位置记录在内存里,新实例不知道 ——
+        // 界面据此把提示写成"本地副本位置没有记录(可能来自上一次运行);点按钮会说明怎么手动处理",
+        // 而不是假装能自动处理。这条边界是刻意的(见文档),但必须有断言钉住:
+        // 哪天改成"持久化副本路径",这条断言就该跟着改。
+        var (rel5, copy5) = await MakeConflictAsync(rh, $"{prefix}-restart.txt", "local-E", "remote-E");
+        Check("⑭ 前提(跨实例):产生了冲突与副本", copy5.Length > 0);
+        await using (var fresh = new SyncHost(ClientConfig.Load(resolveCfgPath), BuildTokenSession(), api,
+                         statePath: Path.Combine(work, "state-resolve.db"), watchLocal: false))
+        {
+            await fresh.StartAsync();
+            Check("⑭ 换一个实例(重启后)不知道副本位置 → CanResolveConflict = false(如实报不可自动处理)",
+                !fresh.CanResolveConflict(rel5));
+            Check("⑭ 但冲突副本文件仍在磁盘上(数据没丢)",
+                File.Exists(copy5));
+            Check("⑭ 跨实例尝试解决 → 返回 false(而不是假装成功)",
+                !await fresh.ResolveConflictAsync(rel5, ConflictResolution.KeepBoth));
+        }
     }
 
     // ------------------------------------------------ ⑮ 远端文件浏览器(只读)

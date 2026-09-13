@@ -35,7 +35,8 @@
                  Foreground="#555" TextWrapping="Wrap" MaxWidth="560" />
     </StackPanel>
 
-    <ListView x:Name="StatusList" Grid.Row="2" FontSize="13">
+    <ListView x:Name="StatusList" Grid.Row="2" FontSize="13"
+              SelectionChanged="OnStatusSelectionChanged">
       <ListView.View>
         <GridView>
           <GridViewColumn Header="文件" Width="320" DisplayMemberBinding="{Binding File}" />
@@ -48,17 +49,21 @@
     </ListView>
 
     <!-- 冲突处理(逐文件):先在列表里选中一行「冲突」,再点其中之一。
-         为什么必须让用户自己点:引擎的默认做法是"两份都保留"(不丢数据),而覆盖
-         无论往哪边覆盖都是**丢一份**,所以只有用户明确选择才做。 -->
+         为什么按钮默认**禁用**、并且把"当前选中什么"写出来:第一版三个按钮一直是可点的,
+         用户点下去才被告诉"请先选中一行「冲突」"—— 顺序靠猜。现在选中状态一眼可见,
+         不可点的原因也写在旁边(状态列表每次刷新都会重建,选中的行会**按路径保住**,见代码后置)。 -->
     <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
       <TextBlock VerticalAlignment="Center" Foreground="#555"
                  Text="冲突处理(先选中列表里的「冲突」行):" />
-      <Button x:Name="KeepLocalButton" Margin="8,0,0,0" Padding="12,4"
+      <Button x:Name="KeepLocalButton" Margin="8,0,0,0" Padding="12,4" IsEnabled="False"
               Content="以本地为准(覆盖远端)" Click="OnResolveKeepLocal" />
-      <Button x:Name="KeepRemoteButton" Margin="6,0,0,0" Padding="12,4"
+      <Button x:Name="KeepRemoteButton" Margin="6,0,0,0" Padding="12,4" IsEnabled="False"
               Content="以远端为准(覆盖本地)" Click="OnResolveKeepRemote" />
-      <Button x:Name="KeepBothButton" Margin="6,0,0,0" Padding="12,4"
+      <Button x:Name="KeepBothButton" Margin="6,0,0,0" Padding="12,4" IsEnabled="False"
               Content="都保留" Click="OnResolveKeepBoth" />
+      <TextBlock x:Name="ConflictHintText" Margin="12,0,0,0" VerticalAlignment="Center"
+                 Foreground="#B06000" TextWrapping="Wrap" MaxWidth="520"
+                 Text="先在下面的列表里点一行「冲突」" />
     </StackPanel>
 
     <TextBlock Grid.Row="4" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap"
