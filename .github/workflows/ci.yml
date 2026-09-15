@@ -1,0 +1,80 @@
+# desktop (netdisk WPF 客户端) — 客户端独立 CI
+#
+# 从原 monorepo 的 desktop 流水线拆分而来。全部 DE-D 行为检查器自含
+# (夹具在 testdata/,不依赖服务端运行时),WPF + WiX 只能在 Windows 构建。
+#
+# 拆分调整说明:
+#  - 原"gen-csharp --check"(在 web/ 目录跑,校验 C# 模型与契约一致)随拆分移除:
+#    其 generator 依赖 web 的 node 工具链,desktop 独立仓无 node 依赖。
+#    C# 模型已提交在本仓 docs/api/openapi.yaml 同源生成;该门禁后续按需重建。
+#  - 原"go test ./internal/namepolicy"(在 server/ 目录跑)移除:服务端纪律
+#    校验已归 Server-Ent 仓的 CI 负责。
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: dotnet build(5 个代码工程 + 20 个检查器)
+        run: dotnet build NetDisk.sln -c Release --nologo
+      - name: 构建 MSI(perUser;单文件载荷)
+        run: dotnet build src/NetDisk.Setup/NetDisk.Setup.wixproj -c Release --nologo
+      - name: 名字规则双端一致性(共享夹具 testdata/name-cases.json)
+        run: dotnet run --project tests/NameRulesCheck -c Release --nologo
+      - name: 登录回环 + PKCE 行为检查(DE-D-03)
+        run: dotnet run --project tests/LoopbackLoginCheck -c Release --nologo
+      - name: 令牌存储 + 静默刷新 + 被吊销退出检查(DE-D-04)
+        run: dotnet run --project tests/TokenSessionCheck -c Release --nologo
+      - name: REST/WebDAV 客户端行为检查(DE-D-05)
+        run: dotnet run --project tests/ApiClientCheck -c Release --nologo
+      - name: TUS 分片上传行为检查(DE-D-06)
+        run: dotnet run --project tests/TusCheck -c Release --nologo
+      - name: 本地状态库 schema 版本化检查(DE-D-07)
+        run: dotnet run --project tests/StateStoreCheck -c Release --nologo
+      - name: 目录监听 / 重扫检查(DE-D-08)
+        run: dotnet run --project tests/WatcherCheck -c Release --nologo
+      - name: 同步状态机检查(DE-D-09)
+        run: dotnet run --project tests/SyncStateCheck -c Release --nologo
+      - name: 自触发销账检查(DE-D-10)
+        run: dotnet run --project tests/ExpectedChangeCheck -c Release --nologo
+      - name: 改名识别 / 失效降级检查(DE-D-11)
+        run: dotnet run --project tests/FileIdentityCheck -c Release --nologo
+      - name: 冲突裁决 / 冲突命名双端一致(DE-D-12)
+        run: dotnet run --project tests/ConflictCheck -c Release --nologo
+      - name: SSE 消费 + 游标双态检查(DE-D-13)
+        run: dotnet run --project tests/ChangeFeedCheck -c Release --nologo
+      - name: 传输队列检查(DE-D-14)
+        run: dotnet run --project tests/TransferCheck -c Release --nologo
+      - name: 首次运行向导检查(DE-D-15)
+        run: dotnet run --project tests/OnboardingCheck -c Release --nologo
+      - name: 长路径 + 本地名字兜底检查(DE-D-16)
+        run: dotnet run --project tests/LongPathCheck -c Release --nologo
+      - name: 协作与分享客户端检查(DE-D-17)
+        run: dotnet run --project tests/SpaceCollabCheck -c Release --nologo
+      - name: 通知 / 托盘 / 开机自启检查(DE-D-18)
+        run: dotnet run --project tests/NotifyCheck -c Release --nologo
+      - name: 自动更新升级序列检查(DE-D-19)
+        run: dotnet run --project tests/UpdateCheck -c Release --nologo
+      - name: 线程纪律与 soak 判定检查(DE-D-21)
+        run: dotnet run --project tests/SoakCheck -c Release --nologo
+      - name: MSI 产物存在性(perUser;R-26)
+        run: |
+          $msi = Get-ChildItem -Recurse -Filter NetDisk.msi | Select-Object -First 1
+          if (-not $msi) { throw "未产出 MSI" }
+          Write-Host "MSI: $($msi.FullName) ($($msi.Length) bytes)"
