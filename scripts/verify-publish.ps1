@@ -35,8 +35,11 @@ Write-Host "本次构建版本 = $version"
 
 Write-Host "== 1) 发布单文件 exe =="
 if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
-$build = & dotnet publish (Join-Path $root 'src\NetDisk.App\NetDisk.App.csproj') -c Release -r win-x64 --self-contained `
-    -p:PublishSingleFile=true -p:RuntimeIdentifier=win-x64 -p:SelfContained=true "-p:Version=$version" -o $publishDir 2>&1
+# 发布:框架依赖单文件(2026-09-17 决策,体积优先)。csproj 已默认
+# SelfContained=false + PublishSingleFile=true,这里只传版本;不要传 --self-contained,
+# 否则会覆盖回自包含(76MB)。
+$build = & dotnet publish (Join-Path $root 'src\NetDisk.App\NetDisk.App.csproj') -c Release -r win-x64 `
+    -p:PublishSingleFile=true -p:RuntimeIdentifier=win-x64 "-p:Version=$version" -o $publishDir 2>&1
 $publishLog = $build -join "`n"
 Check "发布成功且 0 错误" ($LASTEXITCODE -eq 0 -and ($publishLog -notmatch 'error|错误')) "exit=$LASTEXITCODE"
 

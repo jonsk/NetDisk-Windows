@@ -8,7 +8,7 @@
 - 与服务端做**双向同步**（状态机 / 冲突裁决 / 配额滞回）
 - 大文件**分片上传（TUS）/ 断点续传**，REST / WebDAV 传输
 - 系统托盘常驻 + 通知中心 + 开机自启 + 设置界面
-- **免安装、可携带**：单个 EXE 即可拷贝到任意 Windows 电脑运行
+- **体积精简、单文件**：单个 EXE（约 3MB，框架依赖）拷贝即运行，无需安装器
 
 ## 架构
 
@@ -25,30 +25,30 @@
 ## 运行要求
 
 - **Windows x64**（Windows 10 1709+ / 11）。
-- **无需预装 .NET**：发布产物为自包含单文件，.NET 运行时已内嵌。
+- **需先装 .NET Desktop Runtime 10**（一次性；2026-09-17 体积决策由自包含改框架依赖后，exe 从 76.8MB 降到约 3MB，代价是目标机需装 ~30MB 运行库）。
 - 首次运行需要**可写目录**（程序同目录或 `%APPDATA%\NetDisk`）。
 
 ## 分发与运行
 
-### 方式一：单文件 EXE（推荐，可携带）
+### 方式一：单文件 EXE（推荐，体积小）
 
 ```bash
-# 产出恰好一个文件：bin/Release/net10.0-windows/win-x64/publish/NetDisk.App.exe
+# 产出恰好一个文件：bin/Release/net10.0-windows/win-x64/publish/NetDisk.App.exe（约 3MB）
 dotnet publish src/NetDisk.App/NetDisk.App.csproj -c Release -r win-x64 \
-  --self-contained true -p:PublishSingleFile=true -p:Version=1.0.<git提交数>
+  -p:Version=1.0.<git提交数>
 ```
 
-把 `NetDisk.App.exe` 拷到任意 Windows x64 电脑，**双击即运行**。它：
+把 `NetDisk.App.exe` 拷到已装 **.NET Desktop Runtime 10** 的 Windows x64 电脑，**双击即运行**。它：
 
-- 内嵌 .NET 运行时，目标机**无需安装任何东西**；
+- **不内嵌运行时**（框架依赖），体积仅约 3MB；
 - 首次运行在 **exe 同目录**生成 `client.json`（见「配置」）；
 - 程序目录不可写（如 `Program Files`）时，自动回退到 `%APPDATA%\NetDisk`，并在日志中说明回退原因；
 - 删除 exe 即「卸载」，无残留注册表（除可选的自动更新登记）。
 
-> 以上单文件属性已在 `NetDisk.App.csproj` 默认开启：`PublishSingleFile` / `SelfContained` /
-> `RuntimeIdentifier=win-x64` / `IncludeNativeLibrariesForSelfExtract`（SQLite 原生库内嵌）/
-> `EnableCompressionInSingleFile`（约 65MB）/ `DebugType=embedded`。
-> `dotnet publish` 后发布目录里**恰好一个 exe**。
+> 以上单文件属性已在 `NetDisk.App.csproj` 默认开启：`PublishSingleFile` / `SelfContained=false` /
+> `RuntimeIdentifier=win-x64` / `IncludeNativeLibrariesForSelfExtract`（SQLite 原生库内嵌）。
+> `dotnet publish` 后发布目录里**恰好一个 exe**。裸 `dotnet publish` 会自动取 `1.0.<git提交数>`，
+> 无需手写；显式 `-p:Version=...` 仍优先。
 
 > **分发方式说明（2026-09-17）**：项目已**移除 WiX/MSI**，不再提供安装包。分发即「把单个
 > `NetDisk.App.exe` 拷到目标 Windows 电脑」。需要开始菜单快捷方式 / 开机自启的用户，由客户端

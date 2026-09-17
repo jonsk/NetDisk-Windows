@@ -22,26 +22,27 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
     <!--
-      ===== 打包方式:单文件发布(产品要求,2026-09-13)=====
-      目标:`dotnet publish` 后**只有一个 exe**,双击即用(自包含,目标机无需预装 .NET)。
+      ===== 打包方式:单文件 + 框架依赖(2026-09-17 决策:体积优先)=====
+      目标:`dotnet publish` 后**只有一个 exe**,双击即用。
+      体积权衡:自包含(SelfContained=true)会把整套 .NET 运行时打进 exe(75MB+);
+      改**框架依赖**(SelfContained=false)后 exe 仅 ~3MB,但**目标机需先装
+      .NET Desktop Runtime 10**(一次性,之后免再装)。这是"体积 vs 免装运行库"的取舍。
 
-      三个属性各解决一件事:
-        · `RuntimeIdentifier=win-x64` + `SelfContained=true`:自包含单文件**必须**指定 RID
-          (单文件是把运行时一起打包,没有 RID 就不知道打哪一份)。
-        · `PublishSingleFile=true`:把托管程序集合成一个 exe。
-        · `IncludeNativeLibrariesForSelfExtract=true`:SQLite 的原生库(e_sqlite3.dll)
-          必须**塞进** exe,否则运行时会去 exe 旁边找它 —— 而"旁边什么都没有"正是单文件的目标。
-          代价是首次运行会释放到临时目录(运行时自己管理,卸载时随之清理)。
-        · `EnableCompressionInSingleFile=true`:压缩内嵌内容(exe 从 ~150MB 降到 ~65MB)。
-          代价是启动时解压一次;实测启动到写日志 <1s,用户无感,换取 MSI 体积减半是划算的。
-        · `DebugType=embedded`:把符号塞进 exe,不额外产出 .pdb ——
-          否则发布目录会多一个文件,"单文件"名不副实(且 pdb 对最终用户无用)。
+      · `SelfContained=false`:不打包运行时,大幅缩小体积(76.8MB → ~3MB)。
+      · `RuntimeIdentifier=win-x64` + `PublishSingleFile=true`:`dotnet publish`
+        只产出一个 exe(需要 RID 才知道单文件打给谁)。
+      · `IncludeNativeLibrariesForSelfExtract=true`:SQLite 的原生库(e_sqlite3.dll)
+        塞进 exe,否则会作为独立 dll 躺在 exe 旁边 —— 我们要的"发布目录恰好一个文件"
+        就靠它。代价是首次运行会解压到临时目录(运行时自己管理)。
+      · **不设 `EnableCompressionInSingleFile`**:compression 仅自包含支持
+        (框架依赖会报 NETSDK1176);反正框架依赖 exe 已经很小,无需压缩。
+      · `DebugType=embedded`:把符号塞进 exe,不额外产出 .pdb ——
+        否则发布目录会多一个文件,"单文件"名不副实(且 pdb 对最终用户无用)。
     -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
+    <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <DebugType>embedded</DebugType>
     <!-- 只留 exe:**引用工程**仍会各自产出 .pdb,默认会被拷到发布目录里 ——
          结果是"单文件"旁边躺着 3 个 pdb(实测)。这个属性把"引用工程的附属文件"一律挡掉,

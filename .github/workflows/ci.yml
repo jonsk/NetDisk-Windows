@@ -33,8 +33,8 @@ jobs:
           dotnet-version: "10.0.x"
       - name: dotnet build(4 个代码工程 + 20 个检查器)
         run: dotnet build NetDisk.sln -c Release --nologo
-      - name: 发布单文件 exe(自包含,win-x64)
-        run: dotnet publish src/NetDisk.App/NetDisk.App.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -o publish
+      - name: 发布单文件 exe(框架依赖,win-x64;2026-09-17 体积决策)
+        run: dotnet publish src/NetDisk.App/NetDisk.App.csproj -c Release -r win-x64 -p:PublishSingleFile=true -p:RuntimeIdentifier=win-x64 -o publish
       - name: 名字规则双端一致性(共享夹具 testdata/name-cases.json)
         run: dotnet run --project tests/NameRulesCheck -c Release --nologo
       - name: 登录回环 + PKCE 行为检查(DE-D-03)
