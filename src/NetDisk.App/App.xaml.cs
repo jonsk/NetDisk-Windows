@@ -90,7 +90,7 @@ public partial class App : System.Windows.Application
         _main.Show();
     }
 
-    /// <summary>版本号(取程序集信息;与 MSI/自更新用的版本口径一致)。</summary>
+    /// <summary>版本号(取程序集信息;与自更新比对用的版本口径一致)。</summary>
     private static string BuildVersion() =>
         typeof(App).Assembly.GetName().Version?.ToString()
         ?? System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString()
@@ -100,13 +100,13 @@ public partial class App : System.Windows.Application
     /// 无界面模式(**自动更新的两半**)。返回 true = 已处理完毕,调用方应立即按 exitCode 退出。
     ///
     /// 为什么放在客户端里而不是另做一个 updater.exe:产品要求是**单文件发布**,
-    /// MSI 载荷校验收紧到"恰好一个文件"(`verify-msi.ps1` 会断言)。所以更新器 = 客户端自己:
-    /// 主进程把 exe 复制到临时目录,用 `--apply-update` 拉起**那份副本**,然后自己退出;
-    /// 副本去跑 msiexec(它覆盖的是安装目录里的文件,不是自己),装完验活/必要时回滚。
+    /// 发布目录里**恰好一个 exe**。所以更新器 = 客户端自己:主进程把 exe 复制到临时目录,
+    /// 用 `--apply-update` 拉起**那份副本**,然后自己退出;副本去**换装**安装目录里的 exe
+    /// (覆盖的是安装目录里的文件,不是自己),换装完验活/必要时回滚。
     ///
     /// 退出码(脚本与真机演练按它判定,别只看日志):
     ///   `--self-check`  : 0 能活 / 2 有问题(原因写进日志与 stdout)
-    ///   `--apply-update`: 0 升级成功 / 2 安装失败 / 3 验活失败已回滚 / 4 验活失败且回滚失败 / 5 参数不合法
+    ///   `--apply-update`: 0 升级成功 / 2 换装失败 / 3 验活失败已回滚 / 4 验活失败且回滚失败 / 5 参数不合法 / 6 验活失败无备份
     /// </summary>
     private static bool RunHeadlessMode(string[] args, out int exitCode)
     {
@@ -121,9 +121,9 @@ public partial class App : System.Windows.Application
             // ⚠ **必须在线程池上跑**:OnStartup 跑在 UI 线程上,而 WPF 此时已经装好了
             //    SynchronizationContext。若直接在 UI 线程上 `GetAwaiter().GetResult()`,
             //    异步方法里任何一个 await 的续体都会被 Post 回**已被我们阻塞的** UI 线程 ——
-            //    经典死锁。真机演练实测:更新器把新版装好、验活也通过了(self-check 日志两行都在),
-            //    然后**卡在 await 边界上 50 分钟不退出**,演练看起来像"MSI 装得慢"。
-            //    用 Task.Run 把整段异步逻辑交给线程池:那里没有 UI 上下文,续体不再排回 UI 线程。
+            //    经典死锁。真机演练实测:更新器把新版换装好、验活也通过了(self-check 日志两行都在),
+            //    然后**卡在 await 边界上 50 分钟不退出**。用 Task.Run 把整段异步逻辑交给线程池:
+            //    那里没有 UI 上下文,续体不再排回 UI 线程。
             exitCode = Task.Run(() => ApplyUpdateAsync(args)).GetAwaiter().GetResult();
             return true;
         }
@@ -132,7 +132,7 @@ public partial class App : System.Windows.Application
 
     /// <summary>
     /// 装上去的这个客户端**能活吗**:配置能读/能建、数据目录可写、日志可写、令牌密文可解。
-    /// 更新器在新版装好后调用它 —— 这是"新版起不来就回滚"的判据,不能靠猜。
+    /// 更新器在新版换装好后调用它 —— 这是"新版起不来就回滚"的判据,不能靠猜。
     /// </summary>
     private static int SelfCheck()
     {
@@ -168,7 +168,7 @@ public partial class App : System.Windows.Application
         }
     }
 
-    /// <summary>`--apply-update --msi &lt;p&gt; --client &lt;exe&gt; [--previous-msi &lt;p&gt;] [--no-relaunch] [--visible]`</summary>
+    /// <summary>`--apply-update --new-exe &lt;新版本exe&gt; --client &lt;安装目录exe&gt; [--backup &lt;备份exe&gt;] [--no-relaunch]`</summary>
     private static async Task<int> ApplyUpdateAsync(string[] args)
     {
         string? Arg(string name)
@@ -177,25 +177,24 @@ public partial class App : System.Windows.Application
             return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
         }
 
-        var msi = Arg("--msi");
+        var newExe = Arg("--new-exe");
         var client = Arg("--client") ?? Environment.ProcessPath ?? "";
-        var previous = Arg("--previous-msi");
-        if (string.IsNullOrWhiteSpace(msi) || string.IsNullOrWhiteSpace(client))
+        var backup = Arg("--backup");
+        if (string.IsNullOrWhiteSpace(newExe) || string.IsNullOrWhiteSpace(client))
         {
-            Console.Error.WriteLine("用法:--apply-update --msi <安装包> --client <客户端 exe> [--previous-msi <旧包>] [--no-relaunch] [--visible]");
+            Console.Error.WriteLine("用法:--apply-update --new-exe <新版本exe> --client <安装目录exe> [--backup <备份exe>] [--no-relaunch]");
             return 5;
         }
 
         var options = new NetDisk.SyncEngine.Update.UpdaterOptions(
-            msi,
+            newExe,
             client,
-            Silent: !args.Any(a => string.Equals(a, "--visible", StringComparison.OrdinalIgnoreCase)),
             RelaunchClient: !args.Any(a => string.Equals(a, "--no-relaunch", StringComparison.OrdinalIgnoreCase)),
-            PreviousMsiPath: string.IsNullOrWhiteSpace(previous) ? null : previous);
+            BackupExePath: string.IsNullOrWhiteSpace(backup) ? null : backup);
 
         var outcome = await new NetDisk.SyncEngine.Update.UpdaterRunner(
             new NetDisk.SyncEngine.Update.ProcessRunner()).RunAsync(options);
-        AppLog.Write("update", $"更新器:{outcome.Kind} {outcome.Reason}(msiexec={outcome.InstallerExitCode} 已拉起客户端={outcome.Relaunched})");
+        AppLog.Write("update", $"更新器:{outcome.Kind} {outcome.Reason}(exit={outcome.ExitCode} 已拉起客户端={outcome.Relaunched})");
         Console.WriteLine($"{outcome.Kind}: {outcome.Reason}");
         return outcome.Kind switch
         {

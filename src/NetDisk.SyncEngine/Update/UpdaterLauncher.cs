@@ -1,18 +1,13 @@
 // 独立更新器的启动(DE-D-19;Windows 侧)。
 //
 // 为什么要**独立进程**:Windows 会锁住正在运行的 exe,客户端**不能覆盖自己**;
-// 而且 `msiexec` 卸载旧版本时会要求"客户端已退出" —— 自己卸载自己的结果是
-// "卸载到一半进程没了",留下半装状态。所以流程是:客户端把 MSI 路径与收尾动作告诉
-// 更新器进程 → 客户端退出 → 更新器装 MSI → 更新器把客户端拉起来。
+// 而且换装要替换安装目录里的 exe —— 自己替换自己会"文件被占用"。所以流程是:
+// 客户端把新版本 exe 路径告诉**更新器进程**(自己的临时副本)→ 客户端退出 →
+// 更新器换装 exe → 更新器把客户端拉起来。
 //
-// 命令行的两条纪律(检查器断言):
-//   - **MSI 路径必须加引号**(路径含空格是常态;不加引号会被拆成多个参数);
-//   - **必须 /qn**(静默):升级途中弹 UI 会让"自动更新"变成"用户必须点一下",
-//     而 perUser 包不需要提权,静默升级不会触发 UAC(R-26 的 perUser 正是为此)。
-//
-// 失败回滚:更新器发现"新版本装上了但起不来"(见 `--health-check`),就用**旧 MSI**
-// 再装回去 —— 这一半需要真实 MSI 与本机管理员以外权限,属于需要真机演练的部分,
-// 这里把命令行与顺序固定下来并做断言,真机演练列进 DE-D-21 的 soak/发布检查。
+// 命令行的纪律(检查器断言):
+//   - **新版本 exe 路径必须加引号**(路径含空格是常态;不加引号会被拆成多个参数);
+//   - **必须带 --client**(告诉更新器装完拉起哪个 exe)。
 
 using System.Diagnostics;
 
@@ -21,22 +16,15 @@ namespace NetDisk.SyncEngine.Update;
 /// <summary>更新器启动参数。</summary>
 public sealed record UpdaterCommand(
     string UpdaterPath,
-    string MsiPath,
+    string NewExePath,
     string ClientExePath,
-    bool Silent = true,
-    bool RelaunchClient = true,
-    /// <summary>旧安装包(可选):新版验活失败时用它装回去。空 = 明确"没有回滚退路"。</summary>
-    string? PreviousMsiPath = null)
+    bool RelaunchClient = true)
 {
     /// <summary>拼出更新器的命令行(引号与开关都在这里统一,免得各处各拼一份)。</summary>
     public string ToArguments()
     {
-        var silent = Silent ? " /qn" : " /qb";
         var relaunch = RelaunchClient ? " --relaunch" : "";
-        var previous = string.IsNullOrWhiteSpace(PreviousMsiPath)
-            ? ""
-            : $" --previous-msi \"{PreviousMsiPath}\"";
-        return $"--msi \"{MsiPath}\"{silent} --client \"{ClientExePath}\"{relaunch}{previous}";
+        return $"--new-exe \"{NewExePath}\" --client \"{ClientExePath}\"{relaunch}";
     }
 
     public override string ToString() => "\"" + UpdaterPath + "\" " + ToArguments();
@@ -58,15 +46,13 @@ public sealed class UpdaterLauncher
 
     /// <summary>构造更新器命令(纯函数,可断言)。</summary>
     public UpdaterCommand BuildCommand(
-        string msiPath, string clientExePath, bool silent = true, bool relaunch = true,
-        string? previousMsiPath = null)
+        string newExePath, string clientExePath, bool relaunch = true)
     {
-        if (string.IsNullOrWhiteSpace(msiPath))
+        if (string.IsNullOrWhiteSpace(newExePath))
         {
-            throw new ArgumentException("MSI 路径不能为空", nameof(msiPath));
+            throw new ArgumentException("新版本 exe 路径不能为空", nameof(newExePath));
         }
-        return new UpdaterCommand(_updaterPath, msiPath.Trim(), clientExePath.Trim(), silent, relaunch,
-            string.IsNullOrWhiteSpace(previousMsiPath) ? null : previousMsiPath.Trim());
+        return new UpdaterCommand(_updaterPath, newExePath.Trim(), clientExePath.Trim(), relaunch);
     }
 
     /// <summary>

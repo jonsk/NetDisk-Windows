@@ -1,7 +1,7 @@
 # desktop (netdisk WPF 客户端) — 客户端独立 CI
 #
 # 从原 monorepo 的 desktop 流水线拆分而来。全部 DE-D 行为检查器自含
-# (夹具在 testdata/,不依赖服务端运行时),WPF + WiX 只能在 Windows 构建。
+# (夹具在 testdata/,不依赖服务端运行时),WPF 只能在 Windows 构建。
 #
 # 拆分调整说明:
 #  - 原"gen-csharp --check"(在 web/ 目录跑,校验 C# 模型与契约一致)随拆分移除:
@@ -31,10 +31,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
-      - name: dotnet build(5 个代码工程 + 20 个检查器)
+      - name: dotnet build(4 个代码工程 + 20 个检查器)
         run: dotnet build NetDisk.sln -c Release --nologo
-      - name: 构建 MSI(perUser;单文件载荷)
-        run: dotnet build src/NetDisk.Setup/NetDisk.Setup.wixproj -c Release --nologo
+      - name: 发布单文件 exe(自包含,win-x64)
+        run: dotnet publish src/NetDisk.App/NetDisk.App.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -o publish
       - name: 名字规则双端一致性(共享夹具 testdata/name-cases.json)
         run: dotnet run --project tests/NameRulesCheck -c Release --nologo
       - name: 登录回环 + PKCE 行为检查(DE-D-03)
@@ -73,8 +73,13 @@ jobs:
         run: dotnet run --project tests/UpdateCheck -c Release --nologo
       - name: 线程纪律与 soak 判定检查(DE-D-21)
         run: dotnet run --project tests/SoakCheck -c Release --nologo
-      - name: MSI 产物存在性(perUser;R-26)
+      - name: 发布产物校验(恰好一个 exe + 验活)
         run: |
-          $msi = Get-ChildItem -Recurse -Filter NetDisk.msi | Select-Object -First 1
-          if (-not $msi) { throw "未产出 MSI" }
-          Write-Host "MSI: $($msi.FullName) ($($msi.Length) bytes)"
+          $exe = Get-ChildItem -Path publish -Filter NetDisk.App.exe | Select-Object -First 1
+          if (-not $exe) { throw "未产出单文件 exe" }
+          $others = Get-ChildItem -Path publish -File | Where-Object { $_.Name -ne 'NetDisk.App.exe' }
+          if ($others.Count -gt 0) { throw "发布目录含多余文件(违反单文件): $($others.Name -join ', ')" }
+          Write-Host "单文件 exe: $($exe.FullName) ($($exe.Length) bytes)"
+          & $exe.FullName --self-check
+          if ($LASTEXITCODE -ne 0) { throw "新发布 exe 验活失败(self-check 退出码 $LASTEXITCODE)" }
+          Write-Host "self-check 通过"

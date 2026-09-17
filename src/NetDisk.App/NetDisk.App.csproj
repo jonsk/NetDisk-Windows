@@ -35,7 +35,7 @@
         · `EnableCompressionInSingleFile=true`:压缩内嵌内容(exe 从 ~150MB 降到 ~65MB)。
           代价是启动时解压一次;实测启动到写日志 <1s,用户无感,换取 MSI 体积减半是划算的。
         · `DebugType=embedded`:把符号塞进 exe,不额外产出 .pdb ——
-          否则 MSI 载荷会多一个文件,"单文件"名不副实(且 pdb 对最终用户无用)。
+          否则发布目录会多一个文件,"单文件"名不副实(且 pdb 对最终用户无用)。
     -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>

@@ -8,11 +8,11 @@
 //   重启  → 把**自己复制到临时目录**,用 `--apply-update` 拉起那份副本,然后**立刻退出自己**
 //
 // 为什么"重启"要复制自己:Windows 会锁住正在运行的 exe,客户端**不能覆盖自己**;
-// 而更新器必须活到安装完成(安装过程会替换安装目录里的那个 exe)。用临时副本既解决锁文件,
-// 又不违反"单文件发布"(MSI 载荷仍然只有一个 exe)。
+// 而更新器必须活到换装完成(换装过程会替换安装目录里的那个 exe)。用临时副本既解决锁文件,
+// 又不违反"单文件发布"(发布目录仍然只有一个 exe,无 WiX/MSI)。
 //
-// 为什么要"立刻退出":msiexec 要替换安装目录里的 exe,而那个文件正被我们锁着 ——
-// 客户端不退出,安装器要么失败、要么走重启管理器强杀我们(两种都很难看)。
+// 为什么要"立刻退出":更新器要替换安装目录里的 exe,而那个文件正被我们锁着 ——
+// 客户端不退出,换装要么失败、要么走重启管理器强杀我们(两种都很难看)。
 // 所以 `UpdaterLaunched` 事件是**成功拉起更新器之后立刻**发出的,界面收到就 Shutdown。
 
 using NetDisk.SyncEngine.Update;
@@ -23,38 +23,33 @@ namespace NetDisk.SyncEngine.Host;
 public sealed class SyncHostUpdateHost : IUpdateHost
 {
     private readonly SyncRuntime _runtime;
-    private readonly string _msiPath;
-    private readonly string? _previousMsiPath;
+    private readonly string _newExePath;
     private readonly string _clientExePath;
     private readonly TimeSpan _drainTimeout;
 
-    /// <param name="msiPath">要装的安装包(界面让用户选的)。</param>
-    /// <param name="previousMsiPath">旧安装包(可选):新版验活失败时用它回滚。</param>
+    /// <param name="newExePath">新版本 exe 的完整路径(界面让用户选的)。</param>
     /// <param name="clientExePath">安装目录里的客户端 exe;默认取当前进程路径。</param>
     public SyncHostUpdateHost(
         SyncRuntime runtime,
-        string msiPath,
-        string? previousMsiPath = null,
+        string newExePath,
         string? clientExePath = null,
         TimeSpan? drainTimeout = null)
     {
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
-        _msiPath = msiPath;
-        _previousMsiPath = previousMsiPath;
+        _newExePath = newExePath;
         _clientExePath = clientExePath ?? Environment.ProcessPath
             ?? throw new InvalidOperationException("拿不到客户端 exe 路径");
         _drainTimeout = drainTimeout ?? TimeSpan.FromMinutes(2);
     }
 
-    /// <summary>更新器已经拉起来了:界面收到后应当**立刻退出**(给安装器让路)。</summary>
+    /// <summary>更新器已经拉起来了:界面收到后应当**立刻退出**(给换装让路)。</summary>
     public event Action? UpdaterLaunched;
 
     /// <summary>给界面用的一句话描述(用户点"检查更新"前要知道"会发生什么")。</summary>
     public string DescribePlan() =>
-        "将按顺序执行:暂停同步 → 等传输跑完 → 迁移状态库 → 启动更新器安装\r\n" +
-        _msiPath + "\r\n" +
-        "然后客户端会退出;安装完成后自动重新启动。" +
-        (string.IsNullOrEmpty(_previousMsiPath) ? "" : "\r\n(已提供旧安装包:新版起不来会自动回滚)");
+        "将按顺序执行:暂停同步 → 等传输跑完 → 迁移状态库 → 启动更新器换装\r\n" +
+        _newExePath + "\r\n" +
+        "然后客户端会退出;换装完成后自动重新启动(验活失败会自动回滚到旧版本)。";
 
     public Task PauseSyncAsync(CancellationToken ct) => _runtime.Host.PauseAsync();
 
@@ -87,15 +82,14 @@ public sealed class SyncHostUpdateHost : IUpdateHost
         var updater = Path.Combine(stage, "NetDisk.App.exe");
         File.Copy(_clientExePath, updater, overwrite: true);
 
-        var command = new UpdaterLauncher(updater).BuildCommand(
-            _msiPath, _clientExePath, silent: true, relaunch: true, previousMsiPath: _previousMsiPath);
+        var command = new UpdaterLauncher(updater).BuildCommand(_newExePath, _clientExePath, relaunch: true);
         new UpdaterLauncher(updater).Launch(command);
         UpdaterLaunched?.Invoke();
         return Task.CompletedTask;
     }
 
     public Task RollbackAsync(CancellationToken ct) =>
-        throw new NotSupportedException("回滚由更新器(临时副本)负责:它手里有旧安装包与验活结果");
+        throw new NotSupportedException("回滚由更新器(临时副本)负责:它手里有旧版本 exe 备份与验活结果");
 
     /// <summary>状态库路径:与配置同目录(与 <c>SyncRuntime</c> 的取法一致)。</summary>
     private string? StatePath() =>

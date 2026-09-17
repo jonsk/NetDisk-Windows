@@ -4,12 +4,15 @@
 //
 // 升级流程是**一锤子买卖**:不可能靠人工反复演练来验证"顺序对不对、失败时会不会回滚"。
 // 所以这里把每一步做成可注入的假宿主,把顺序、超时、失败路径全部跑一遍。
+//
+// 2026-09-17:移除 WiX/MSI,改为**单文件 exe 换装模型**(`--apply-update --new-exe <新exe> --client <安装目录exe>`)。
+// 更新器(客户端临时副本)先把当前 exe 备份,再把新 exe 覆盖进安装目录,然后跑 `--self-check` 验活;
+// 验活失败就还原备份(回滚)。下列断言同步改为覆盖"换装 / 验活 / 回滚"三件事。
 
 using NetDisk.SyncEngine.Update;
 
 // 更新器协议断言里用的固定输入(含**空格**的路径:引号问题就是这样暴露的)
-const string MsiV2 = @"C:\tmp\有 空格\NetDisk-2.msi";
-const string MsiV1 = @"C:\tmp\有 空格\NetDisk-1.msi";
+const string NewExe = @"C:\tmp\有 空格\NetDisk 2.0\NetDisk.App.exe";
 const string ClientExe = @"C:\Users\u\AppData\Local\Programs\NetDisk\NetDisk.App.exe";
 
 var checks = new List<(string Name, Func<Task> Run)>
@@ -22,16 +25,15 @@ var checks = new List<(string Name, Func<Task> Run)>
     ("⑥ 暂停失败 → 什么都不做(尤其不迁移)", CheckPauseFailureAsync),
     ("⑦ 失败路径**永远**恢复同步(不留卡住的客户端)", CheckAlwaysResumesAsync),
     ("⑧ 回滚也失败时,恢复同步仍然要做", CheckResumeEvenIfRollbackFailsAsync),
-    ("⑨ 更新器命令行:MSI 路径带引号 + /qn 静默 + --relaunch", CheckUpdaterCommandAsync),
+    ("⑨ 更新器命令行:--new-exe 带引号 + --client + --relaunch", CheckUpdaterCommandAsync),
     ("⑩ 升级失败不抛异常给调用方(UI 要能如实提示)", CheckNoThrowAsync),
-    ("⑪ 更新器协议:msiexec 参数加引号/静默/不重启,验活用 --self-check", CheckUpdaterInstallArgsAsync),
-    ("⑫ 退出码 3010(成功但需重启)也算成功,不许回滚", CheckUpdaterRebootCodeAsync),
-    ("⑬ 安装失败(1603)→ InstallFailed,且**仍把客户端拉起来**", CheckUpdaterInstallFailAsync),
-    ("⑭ 新版验活失败 → 用**旧包**回滚,结论 = 已回滚", CheckUpdaterHealthFailRollbackAsync),
-    ("⑮ 验活失败但**没有旧包** → 如实报 HealthCheckFailed(不谎报成功)", CheckUpdaterHealthFailNoPreviousAsync),
-    ("⑯ 回滚也失败 → 结论 = 回滚失败(最坏情况不掩盖)", CheckUpdaterRollbackFailAsync),
-    ("⑰ 超时不等待:验活超时按「没活」处理 → 走回滚", CheckUpdaterHealthTimeoutAsync),
-    ("⑱ 不重启客户端时一次都不拉进程(--no-relaunch 语义)", CheckUpdaterNoRelaunchAsync),
+    ("⑪ 更新器协议:换装 → 验活(--self-check) → 成功拉起客户端", CheckUpdaterInstallArgsAsync),
+    ("⑫ 换装失败(写目标失败) → InstallFailed 且仍拉起旧版", CheckUpdaterSwapFailAsync),
+    ("⑬ 验活失败 + 有备份 → 还原备份,结论 = 已回滚", CheckUpdaterHealthFailRollbackAsync),
+    ("⑭ 验活失败 + 无备份 → 如实报 HealthCheckFailed(不谎报成功)", CheckUpdaterHealthFailNoBackupAsync),
+    ("⑮ 回滚也失败 → 结论 = 回滚失败(最坏情况不掩盖)", CheckUpdaterRollbackFailAsync),
+    ("⑯ 验活超时按「没活」处理 → 走回滚", CheckUpdaterHealthTimeoutAsync),
+    ("⑰ 不重启客户端时一次都不拉进程(--no-relaunch 语义)", CheckUpdaterNoRelaunchAsync),
 };
 
 var failed = 0;
@@ -52,7 +54,7 @@ foreach (var (name, run) in checks)
 Console.WriteLine();
 if (failed == 0)
 {
-    Console.WriteLine($"全部通过:{checks.Count} 项 DE-D-19 行为断言(升级序列)");
+    Console.WriteLine($"全部通过:{checks.Count} 项 DE-D-19 行为断言(升级序列 / exe 换装模型)");
     return 0;
 }
 Console.Error.WriteLine($"{failed}/{checks.Count} 项失败");
@@ -183,28 +185,32 @@ static async Task CheckResumeEvenIfRollbackFailsAsync()
     Assert(outcome.Reason.Contains("回滚也失败"), "原因里要说清回滚失败,实际 " + outcome.Reason);
 }
 
+// ---------------------------------------------------------------- 更新器协议(⑨~⑰)
+
+static UpdaterOptions Options(string? backup = ClientExe + UpdaterRunner.BackupSuffix, bool relaunch = true) =>
+    new(NewExe, ClientExe, RelaunchClient: relaunch, BackupExePath: backup);
+
 static Task CheckUpdaterCommandAsync()
 {
     var launcher = new UpdaterLauncher(@"C:\Program Files\NetDisk\NetDisk.Updater.exe");
     var cmd = launcher.BuildCommand(
-        @"C:\Users\u\Downloads\NetDisk 1.0.1.msi",
-        @"C:\Users\u\AppData\Local\NetDisk\NetDisk.App.exe");
+        NewExe,
+        ClientExe);
 
     var args = cmd.ToArguments();
-    Assert(args.Contains("--msi \"C:\\Users\\u\\Downloads\\NetDisk 1.0.1.msi\""),
-        "MSI 路径必须加引号(含空格是常态,不加会被拆成多个参数),实际 " + args);
-    Assert(args.Contains(" /qn"), "必须静默安装(/qn):升级途中弹 UI 就不是「自动」更新了,实际 " + args);
-    Assert(args.Contains("--relaunch"), "装完要把客户端拉起来(否则用户以为程序没了),实际 " + args);
-    Assert(args.Contains("--client \"C:\\Users\\u\\AppData\\Local\\NetDisk\\NetDisk.App.exe\""),
+    Assert(args.Contains($"--new-exe \"{NewExe}\""),
+        "新版本 exe 路径必须加引号(含空格是常态,不加会被拆成多个参数),实际 " + args);
+    Assert(args.Contains($"--client \"{ClientExe}\""),
         "要告诉更新器装完拉起哪个 exe,实际 " + args);
+    Assert(args.Contains("--relaunch"), "换装完要把客户端拉起来(否则用户以为程序没了),实际 " + args);
     Assert(cmd.ToString().StartsWith("\"C:\\Program Files\\NetDisk\\NetDisk.Updater.exe\"", StringComparison.Ordinal),
         "更新器自身路径也要带引号(它在 Program Files 里),实际 " + cmd);
 
-    // 路径为空必须被拒(否则会拼出一个"装空气"的命令行)
+    // 路径为空必须被拒(否则会拼出一个"换装空气"的命令行)
     var rejected = false;
     try { _ = launcher.BuildCommand("", "x.exe"); }
     catch (ArgumentException) { rejected = true; }
-    Assert(rejected, "空 MSI 路径必须被拒绝");
+    Assert(rejected, "空新版本 exe 路径必须被拒绝");
     return Task.CompletedTask;
 }
 
@@ -217,83 +223,63 @@ static async Task CheckNoThrowAsync()
     Assert(!string.IsNullOrEmpty(outcome?.Reason), "结果里必须带可展示的原因(而不是抛异常)");
 }
 
-// ---------------------------------------------------------------- 更新器协议(⑪~⑱)
-
-static UpdaterOptions Options(string? previous = MsiV1) =>
-    new(MsiV2, ClientExe, PreviousMsiPath: previous);
-
 static async Task CheckUpdaterInstallArgsAsync()
 {
     var fake = new FakeRunner();
-    var outcome = await new UpdaterRunner(fake).RunAsync(Options());
+    var files = new FakeFileSwap();
+    var outcome = await new UpdaterRunner(fake, files).RunAsync(Options());
     Assert(outcome.Kind == UpdaterOutcomeKind.Upgraded, $"应成功,实际 {outcome.Kind}:{outcome.Reason}");
-    Assert(fake.Calls.Count == 2, $"应恰好两次等待调用(装 + 验活),实际 {fake.Calls.Count}");
-    var (exe, args, _) = fake.Calls[0];
-    Assert(exe == UpdaterRunner.MsiexecPath, $"应调用 msiexec,实际 {exe}");
-    // 路径含空格必须加引号:不加会被拆成多个参数,安装器收到一个不存在的包路径
-    Assert(args.Contains($"\"{MsiV2}\""), "MSI 路径必须加引号,实际 " + args);
-    Assert(args.Contains("/qn"), "必须静默(/qn):perUser 包不触发 UAC,不该弹 UI,实际 " + args);
-    Assert(args.Contains("/norestart"), "必须 /norestart:升级途中弹「需要重启」会把无人值守变成有人值守,实际 " + args);
-    Assert(fake.Calls[1].Exe == ClientExe && fake.Calls[1].Args == "--self-check",
-        $"验活必须由客户端自己回答(--self-check),实际 {fake.Calls[1].Exe} {fake.Calls[1].Args}");
-    Assert(fake.Started.Count == 1 && fake.Started[0] == ClientExe, "成功后应拉起客户端一次");
+    // 换装是文件拷贝(不是进程调用);唯一的进程调用是验活 --self-check
+    Assert(fake.Calls.Count == 1, $"应恰好一次等待调用(验活),实际 {fake.Calls.Count}");
+    Assert(fake.Calls[0].Exe == ClientExe && fake.Calls[0].Args == "--self-check",
+        $"验活必须由客户端自己回答(--self-check),实际 {fake.Calls[0].Exe} {fake.Calls[0].Args}");
+    Assert(files.BackupCalls.Count == 1, "应先备份当前 exe(回滚用)");
+    Assert(files.SwapCalls.Count == 1, "应把新 exe 换装进安装目录");
+    Assert(files.Deleted.Count == 1, "成功后应清掉旧备份");
+    Assert(fake.Started.Count == 1 && fake.Started[0] == ClientExe, "成功后应拉起客户端一次(已是新版)");
 }
 
-static async Task CheckUpdaterRebootCodeAsync()
+static async Task CheckUpdaterSwapFailAsync()
 {
-    // 3010 = 成功但需要重启。把它当失败会导致"明明装上了却回滚"
     var fake = new FakeRunner();
-    fake.ExitCodes.Enqueue(UpdaterRunner.SuccessNeedsReboot);
-    var outcome = await new UpdaterRunner(fake).RunAsync(Options());
-    Assert(outcome.Kind == UpdaterOutcomeKind.Upgraded, $"3010 必须算成功,实际 {outcome.Kind}:{outcome.Reason}");
-    Assert(fake.Calls.Count == 2, "3010 之后仍应验活(而不是直接回滚)");
-    Assert(!fake.Calls.Any(c => c.Args.Contains($"\"{MsiV1}\"")), "3010 不该触发回滚(不该装旧包)");
-}
-
-static async Task CheckUpdaterInstallFailAsync()
-{
-    var fake = new FakeRunner { DefaultExitCode = 1603 }; // 1603 = 致命错误(常见于权限/磁盘)
-    var outcome = await new UpdaterRunner(fake).RunAsync(Options());
-    Assert(outcome.Kind == UpdaterOutcomeKind.InstallFailed, $"装失败应报 InstallFailed,实际 {outcome.Kind}");
-    Assert(outcome.InstallerExitCode == 1603, "结论里要带 msiexec 退出码(排障靠它)");
-    Assert(fake.Calls.Count == 1, "装都没装上,不该再验活");
+    var files = new FakeFileSwap { SwapInShouldThrow = true };
+    var outcome = await new UpdaterRunner(fake, files).RunAsync(Options());
+    Assert(outcome.Kind == UpdaterOutcomeKind.InstallFailed, $"换装失败应报 InstallFailed,实际 {outcome.Kind}");
+    Assert(fake.Calls.Count == 0, "换装都没成功,不该再验活");
     // 关键是这一条:失败也要把客户端拉起来,否则用户升级失败后面对的是"程序不见了"
-    Assert(fake.Started.Count == 1, "安装失败后仍应拉起客户端(旧版本还在,用户至少能用)");
+    Assert(fake.Started.Count == 1, "换装失败后仍应拉起客户端(旧版本还在,用户至少能用)");
 }
 
 static async Task CheckUpdaterHealthFailRollbackAsync()
 {
-    var fake = new FakeRunner();
-    fake.ExitCodes.Enqueue(0);   // 装新版成功
-    fake.ExitCodes.Enqueue(1);   // 验活失败(新版起不来)
-    fake.ExitCodes.Enqueue(0);   // 回滚成功
-    var outcome = await new UpdaterRunner(fake).RunAsync(Options());
+    var fake = new FakeRunner { DefaultExitCode = 1 }; // 验活失败(新版起不来)
+    var files = new FakeFileSwap();
+    var outcome = await new UpdaterRunner(fake, files).RunAsync(Options());
     Assert(outcome.Kind == UpdaterOutcomeKind.HealthCheckFailedRolledBack,
         $"验活失败应回滚,实际 {outcome.Kind}:{outcome.Reason}");
-    Assert(fake.Calls.Count == 3, $"应为 装→验活→回滚 三步,实际 {fake.Calls.Count}");
-    Assert(fake.Calls[2].Args.Contains($"\"{MsiV1}\""), "回滚必须用**旧包**");
-    Assert(fake.Started.Count == 1, "回滚后也要把客户端拉起来");
+    Assert(fake.Calls.Count == 1, $"应为 验活 这一步(换装是文件操作),实际 {fake.Calls.Count}");
+    Assert(files.RestoreCalls.Count == 1, "回滚必须真的还原备份");
+    Assert(fake.Started.Count == 1, "回滚后也要把客户端拉起来(旧版仍在位)");
 }
 
-static async Task CheckUpdaterHealthFailNoPreviousAsync()
+static async Task CheckUpdaterHealthFailNoBackupAsync()
 {
-    var fake = new FakeRunner();
-    fake.ExitCodes.Enqueue(0);   // 装成功
-    fake.ExitCodes.Enqueue(1);   // 验活失败
-    var outcome = await new UpdaterRunner(fake).RunAsync(Options(previous: null));
+    var fake = new FakeRunner { DefaultExitCode = 1 }; // 验活失败
+    var files = new FakeFileSwap { BackupShouldThrow = true }; // 备份失败 → 无退路
+    // 备份创建失败:更新器没有可用备份可回滚,必须如实报 HealthCheckFailed(不许谎报成功)
+    var outcome = await new UpdaterRunner(fake, files).RunAsync(Options());
     Assert(outcome.Kind == UpdaterOutcomeKind.HealthCheckFailed,
-        $"没有旧包时必须如实报 HealthCheckFailed(不许谎报成功),实际 {outcome.Kind}");
+        $"没有备份时必须如实报 HealthCheckFailed(不许谎报成功),实际 {outcome.Kind}");
     Assert(!outcome.Success, "这不是成功");
-    Assert(fake.Calls.Count == 2, "没有旧包就不该尝试回滚");
+    Assert(files.RestoreCalls.Count == 0, "没有备份就不该尝试回滚");
+    Assert(fake.Started.Count == 1, "验活失败后也要把客户端拉起来(手动还能用)");
 }
 
 static async Task CheckUpdaterRollbackFailAsync()
 {
-    var fake = new FakeRunner();
-    fake.ExitCodes.Enqueue(0);    // 装成功
-    fake.ExitCodes.Enqueue(1);    // 验活失败
-    fake.ExitCodes.Enqueue(1603); // 回滚失败
-    var outcome = await new UpdaterRunner(fake).RunAsync(Options());
+    var fake = new FakeRunner { DefaultExitCode = 1 }; // 验活失败
+    var files = new FakeFileSwap { RestoreShouldThrow = true };
+    var outcome = await new UpdaterRunner(fake, files).RunAsync(Options());
     Assert(outcome.Kind == UpdaterOutcomeKind.HealthCheckFailedRollbackFailed,
         $"回滚失败必须如实报(最坏情况不掩盖),实际 {outcome.Kind}");
     Assert(fake.Started.Count == 1, "回滚失败也要把客户端拉起来(手动还能用)");
@@ -302,21 +288,19 @@ static async Task CheckUpdaterRollbackFailAsync()
 static async Task CheckUpdaterHealthTimeoutAsync()
 {
     var fake = new FakeRunner();
-    fake.ExitCodes.Enqueue(0);   // 装成功
-    fake.TimeoutCalls.Add(2);    // **第二次**调用(验活)超时:新版卡住起不来
-    fake.ExitCodes.Enqueue(0);   // 回滚成功
-    var outcome = await new UpdaterRunner(fake).RunAsync(Options());
+    fake.TimeoutCalls.Add(1); // **第一次**(也是唯一一次)调用(验活)超时:新版卡住起不来
+    var files = new FakeFileSwap();
+    var outcome = await new UpdaterRunner(fake, files).RunAsync(Options());
     Assert(outcome.Kind == UpdaterOutcomeKind.HealthCheckFailedRolledBack,
         $"验活超时按「没活」处理并回滚,实际 {outcome.Kind}:{outcome.Reason}");
-    Assert(fake.Calls.Count == 3, $"应为 装→验活(超时)→回滚 三步,实际 {fake.Calls.Count}");
-    Assert(fake.Calls[2].Args.Contains($"\"{MsiV1}\""), "超时路径也要真的回滚");
+    Assert(files.RestoreCalls.Count == 1, "超时路径也要真的回滚");
 }
 
 static async Task CheckUpdaterNoRelaunchAsync()
 {
     var fake = new FakeRunner();
-    var outcome = await new UpdaterRunner(fake).RunAsync(new UpdaterOptions(
-        MsiV2, ClientExe, RelaunchClient: false, PreviousMsiPath: MsiV1));
+    var files = new FakeFileSwap();
+    var outcome = await new UpdaterRunner(fake, files).RunAsync(Options(relaunch: false));
     Assert(outcome.Kind == UpdaterOutcomeKind.Upgraded, "不重启客户端不影响升级本身");
     Assert(fake.Started.Count == 0, "--no-relaunch 时一次都不该拉进程");
     Assert(!outcome.Relaunched, "结论里要如实反映「没有拉起客户端」");
@@ -357,6 +341,53 @@ sealed class FakeRunner : IProcessRunner
     }
 
     public void StartDetached(string exe, string arguments) => Started.Add(exe);
+}
+
+/// <summary>假文件换装:记录每一次拷贝/还原,并按场景注入失败。绝不触碰真实磁盘。</summary>
+sealed class FakeFileSwap : IFileSwap
+{
+    public List<(string Src, string Dst)> BackupCalls { get; } = new();
+    public List<(string Src, string Dst)> SwapCalls { get; } = new();
+    public List<(string Src, string Dst)> RestoreCalls { get; } = new();
+    public List<string> Deleted { get; } = new();
+    public bool ExistsResult { get; set; } = true;
+    public bool SwapInShouldThrow { get; set; }
+    public bool RestoreShouldThrow { get; set; }
+    public bool BackupShouldThrow { get; set; }
+
+    private bool _backupWasCalled;
+    public bool Exists(string path) =>
+        path.EndsWith(UpdaterRunner.BackupSuffix, StringComparison.OrdinalIgnoreCase) ? _backupWasCalled : ExistsResult;
+
+    public void Backup(string source, string backup)
+    {
+        if (BackupShouldThrow)
+        {
+            throw new IOException("备份失败(注入)");
+        }
+        _backupWasCalled = true;
+        BackupCalls.Add((source, backup));
+    }
+
+    public void SwapIn(string newExe, string target)
+    {
+        if (SwapInShouldThrow)
+        {
+            throw new IOException("换装写入失败(注入)");
+        }
+        SwapCalls.Add((newExe, target));
+    }
+
+    public void Restore(string backup, string target)
+    {
+        if (RestoreShouldThrow)
+        {
+            throw new IOException("还原失败(注入)");
+        }
+        RestoreCalls.Add((backup, target));
+    }
+
+    public void Delete(string path) => Deleted.Add(path);
 }
 
 /// <summary>假宿主:记录调用顺序,并可按场景注入失败。</summary>

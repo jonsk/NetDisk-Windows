@@ -122,13 +122,13 @@ public partial class MainWindow : Window
     private bool _trayHintShown;
 
     /// <summary>
-    /// 「检查更新」:让用户选一个**新版本安装包**,然后按契约顺序升级。
+    /// 「检查更新」:让用户选一个**新版本程序**(NetDisk.App.exe),然后按契约顺序升级。
     ///
     /// 三条纪律:
-    ///   ① **必须先让用户确认**:升级会把客户端关掉再装(期间同步暂停),这是一次有感的操作;
+    ///   ① **必须先让用户确认**:升级会把客户端关掉再换装(期间同步暂停),这是一次有感的操作;
     ///   ② 升级序列交给引擎(`UpdateOrchestrator`):暂停 → 排空 → 迁移 → 启动更新器,
     ///      失败路径会**恢复同步**并把原因返回,界面如实显示;
-    ///   ③ 更新器拉起来之后**立刻退出**:msiexec 要替换安装目录里的 exe,而我们正锁着它。
+    ///   ③ 更新器拉起来之后**立刻退出**:更新器要替换安装目录里的 exe,而我们正锁着它。
     /// </summary>
     private async void OnCheckUpdate(object sender, RoutedEventArgs e)
     {
@@ -140,8 +140,8 @@ public partial class MainWindow : Window
         // 限定名是必须的:本工程同时开了 UseWPF 与 UseWindowsForms(托盘),两边都有 OpenFileDialog/MessageBox/Application
         var dlg = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "选择 NetDisk 新版本安装包(.msi)",
-            Filter = "Windows 安装包 (*.msi)|*.msi",
+            Title = "选择 NetDisk 新版本程序 (NetDisk.App.exe)",
+            Filter = "NetDisk 程序 (*.exe)|*.exe",
             CheckFileExists = true,
         };
         if (dlg.ShowDialog(this) != true)
@@ -159,15 +159,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        UpdateStatusText.Text = "正在升级(暂停同步 → 等传输跑完 → 迁移状态库 → 启动更新器)…";
+        UpdateStatusText.Text = "正在升级(暂停同步 → 等传输跑完 → 迁移状态库 → 启动更新器换装)…";
         var exited = false;
         host.UpdaterLaunched += () =>
         {
-            // 更新器已在独立进程里:我们必须**立刻让路**,否则安装器替换不了 exe
+            // 更新器已在独立进程里:我们必须**立刻让路**,否则换装替换不了 exe
             exited = true;
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                AppLog.Write("app", "更新器已启动,客户端退出以完成升级(安装完成后会自动重启)");
+                AppLog.Write("app", "更新器已启动,客户端退出以完成升级(换装完成后会自动重启)");
                 _exitRequested = true;
                 System.Windows.Application.Current.Shutdown();
             }));
