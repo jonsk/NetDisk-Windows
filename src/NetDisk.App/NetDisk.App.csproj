@@ -55,4 +55,41 @@
     <ProjectReference Include="..\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
   </ItemGroup>
 
+  <!--
+    版本号自动推导(2026-09-17):dotnet publish 不传 Version 属性时,自动取
+    git 提交计数得到 1.0.&lt;提交数&gt;(单调递增、可复现,与 scripts/verify-publish.ps1 同源)。
+    只在调用方没显式给版本时生效(命令行 -p:Version=... 优先级更高)。
+
+    为什么必须在这里同时写 Version/AssemblyVersion/FileVersion/InformationalVersion:
+      Directory.Build.props 在**求值阶段**把 Version 定为默认 1.0.0,SDK 也据此在求值期
+      派生出程序集版本属性;而 GenerateAssemblyInfo 真正写 AssemblyInfo.cs 是在**执行阶段**
+      (读取当时的属性值)。所以只改 Version 是不够的 —— 必须把四个版本属性一起在执行期
+      覆盖,GenerateAssemblyInfo 才会写进 1.0.&lt;提交数&gt;。
+
+    判定"调用方是否显式给版本":用 Directory.Build.props 的默认 1.0.0 作哨兵 ——
+      若当前 Version 仍是这个默认值,说明没被命令行覆盖,才做自动推导;
+      否则原样保留调用方传入的版本。
+    无 git(纯拷贝构建)时保持 1.0.0。
+  -->
+  <Target Name="ComputeNetDiskBuildVersion"
+          BeforeTargets="PrepareForBuild;GenerateAssemblyInfo;GetAssemblyVersion">
+    <Exec Command="git rev-list --count HEAD"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_NetDiskGitCount" />
+      <Output TaskParameter="ExitCode" PropertyName="_NetDiskGitExit" />
+    </Exec>
+    <PropertyGroup>
+      <!-- 哨兵判断:仅当仍停在默认 1.0.0(未被命令行覆盖)且 git 可取时,才自动推导 -->
+      <Version Condition="'$(Version)' == '1.0.0' and '$(_NetDiskGitExit)' == '0' and '$(_NetDiskGitCount)' != ''">1.0.$(_NetDiskGitCount.Trim())</Version>
+      <!-- 程序集版本属性必须在执行期一起覆盖(见上方注释);
+           InformationalVersion 的 +server.1.0.0 后缀是**服务端版本**锚点(ADR-3),
+           固定不变,只有基础版本跟随桌面端推导。 -->
+      <AssemblyVersion>$(Version).0</AssemblyVersion>
+      <FileVersion>$(Version)</FileVersion>
+      <InformationalVersion>$(Version)+server.1.0.0</InformationalVersion>
+    </PropertyGroup>
+  </Target>
+
 </Project>
