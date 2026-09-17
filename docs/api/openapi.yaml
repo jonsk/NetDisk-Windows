@@ -429,31 +429,6 @@ paths:
             Upload-Offset: { schema: { type: integer } }
             Upload-Length: { schema: { type: integer } }
 
-  /api/v1/upload/simple:
-    post:
-      tags: [upload]
-      summary: H5 multipart 直传(元数据段在前,文件段在后;≤100MB)
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [metadata, file]
-              properties:
-                metadata:
-                  type: string
-                  description: JSON {space_id,parent_id,name,size,hash}
-                file: { type: string, format: binary }
-      responses:
-        "201":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/UploadSimpleResult" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "413": { description: 超出 H5 直传上限 }
-
   /api/v1/upload/{id}/finish:
     post:
       tags: [upload]
@@ -833,49 +808,6 @@ paths:
                 frozen: { type: boolean }
       responses:
         "200": { description: OK }
-
-  /api/v1/audit/logs:
-    get:
-      tags: [admin]
-      summary: 查询审计日志(管理员;format=csv 时导出)
-      description: |
-        路径按架构文档接口表(`/api/v1/audit/logs`),不是 `/admin/` 前缀。
-
-        四条纪律:①**查询本身也被审计**(`audit.query` / `audit.export`);
-        ②**必须带时间范围**,未传时默认最近 7 天并在响应里回显真正生效的范围 ——
-        `audit_logs` 按月分区,无范围查询会扫过所有分区;
-        ③导出是流式 CSV,**行数到顶时用 `X-Audit-Truncated: true` 明确告知**,
-        不静默截断;④时间参数同时接受 RFC3339 与 Unix 秒。
-      parameters:
-        - { name: from, in: query, schema: { type: string }, description: RFC3339 或 Unix 秒(默认 now-7d) }
-        - { name: to, in: query, schema: { type: string }, description: RFC3339 或 Unix 秒(默认 now) }
-        - { name: user_id, in: query, schema: { type: string } }
-        - { name: space_id, in: query, schema: { type: string } }
-        - { name: action, in: query, schema: { type: string } }
-        - { name: target_type, in: query, schema: { type: string } }
-        - { name: target_id, in: query, schema: { type: string } }
-        - name: result
-          in: query
-          schema: { type: string, enum: [denied, not_found, conflict, failed] }
-          description: 结果分类(空 = 只看成功)
-        - { name: result_code, in: query, schema: { type: string } }
-        - { name: request_id, in: query, schema: { type: string } }
-        - name: limit
-          in: query
-          schema: { type: integer, minimum: 1, maximum: 5000, default: 200 }
-        - { name: before, in: query, schema: { type: string }, description: keyset 游标时间(上一页最后一条) }
-        - { name: before_id, in: query, schema: { type: string }, description: keyset 游标 id }
-        - name: format
-          in: query
-          schema: { type: string, enum: [json, csv] }
-      responses:
-        "200":
-          description: OK(JSON 列表;format=csv 时为 text/csv 附件)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuditLogPage" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "403": { $ref: "#/components/responses/Forbidden" }
 
 components:
   securitySchemes:

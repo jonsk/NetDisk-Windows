@@ -20,6 +20,9 @@
       <TabItem Header="团队空间">
         <views:SpacesView x:Name="Spaces" />
       </TabItem>
+      <TabItem Header="我的分享">
+        <views:MySharesView x:Name="MyShares" />
+      </TabItem>
       <TabItem Header="设置">
         <views:SettingsView x:Name="Settings" RestartRequested="OnRestartRequested" LogoutRequested="OnLogoutRequested" />
       </TabItem>

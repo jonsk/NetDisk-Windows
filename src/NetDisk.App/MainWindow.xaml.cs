@@ -295,6 +295,8 @@ public partial class MainWindow : Window
         Spaces.Attach(runtime.Api);
         // 远端文件浏览器:只读地看整个空间(与同步共用同一条已注入令牌的连接)
         Remote.Attach(runtime);
+        // 我的分享:列/吊销/复制分享链接(用户面,与 /admin 平行)
+        MyShares.Attach(runtime.Api);
         Settings.Attach(runtime);
         runtime.Host.StatusChanged += OnStatusChanged;
         // 先补记历史:头几轮对账的进展发生在订阅之前(引擎在 StartAsync 里就开始了),

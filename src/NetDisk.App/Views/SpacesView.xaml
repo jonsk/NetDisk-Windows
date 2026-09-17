@@ -35,12 +35,16 @@
       <TextBlock FontWeight="SemiBold" Text="创建分享链接" />
       <TextBlock Margin="0,4,0,0" Foreground="#666" Text="文件 id(在客户端文件树里右键获取)" />
       <TextBox x:Name="ShareFileId" Margin="0,2,0,0" />
-      <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-        <TextBlock Text="有效期(小时)" VerticalAlignment="Center" />
-        <TextBox x:Name="ShareExpiresHours" Width="48" Margin="6,0,0,0" Text="24" />
-        <TextBlock Text="口令" VerticalAlignment="Center" Margin="8,0,0,0" />
-        <TextBox x:Name="SharePassword" Width="80" Margin="6,0,0,0" />
-      </StackPanel>
+
+      <TextBlock Margin="0,6,0,0" Text="有效期(小时,留空=默认7天)" />
+      <TextBox x:Name="ShareExpiresHours" Margin="0,2,0,0" Text="24" />
+
+      <TextBlock Margin="0,6,0,0" Text="最大下载次数(留空=不限)" />
+      <TextBox x:Name="ShareMaxDownloads" Margin="0,2,0,0" />
+
+      <TextBlock Margin="0,6,0,0" Text="访问口令(留空=无密码)" />
+      <TextBox x:Name="SharePassword" Margin="0,2,0,0" />
+
       <Button x:Name="CreateShareButton" Margin="0,6,0,0" Content="创建分享"
               Click="OnCreateShare" />
       <TextBox x:Name="ShareLink" Margin="0,6,0,0" IsReadOnly="True" TextWrapping="Wrap"

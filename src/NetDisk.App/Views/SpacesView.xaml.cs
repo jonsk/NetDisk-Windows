@@ -263,16 +263,29 @@ public partial class SpacesView : System.Windows.Controls.UserControl
         }
         try
         {
-            var hours = int.TryParse(ShareExpiresHours.Text, out var h) ? h : (int?)null;
+            var hours = string.IsNullOrWhiteSpace(ShareExpiresHours.Text)
+                ? (int?)null
+                : (int.TryParse(ShareExpiresHours.Text, out var h) ? h : (int?)null);
+            var maxDownloads = string.IsNullOrWhiteSpace(ShareMaxDownloads.Text)
+                ? (int?)null
+                : (int.TryParse(ShareMaxDownloads.Text, out var m) ? m : (int?)null);
             var created = await _client.CreateShareAsync(new ShareCreateRequest
             {
                 FileId = ShareFileId.Text.Trim(),
                 Password = string.IsNullOrWhiteSpace(SharePassword.Text) ? null : SharePassword.Text,
                 ExpiresInHours = hours,
+                MaxDownloads = maxDownloads,
             });
             var baseUrl = Environment.GetEnvironmentVariable("NETDISK_BASE_URL") ?? "";
             ShareLink.Text = ShareLinks.LinkFor(created, baseUrl);
-            Status("分享已创建(免登录出口,请自行确认有效期与口令)");
+
+            // 把服务端回显的约束原样告诉用户(免得"建完不知道限制有没有生效")
+            var info = new System.Text.StringBuilder();
+            info.Append("分享已创建(免登录出口):");
+            info.Append(created.need_password ? " 已设口令;" : " 无口令;");
+            info.Append(created.expires_at == null ? " 默认7天有效;" : $" 有效期至 {created.expires_at};");
+            info.Append(created.max_downloads == null ? " 下载次数不限;" : $" 最多 {created.max_downloads} 次下载;");
+            Status(info.ToString());
         }
         catch (Exception ex)
         {

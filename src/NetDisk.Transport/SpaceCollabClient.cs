@@ -16,6 +16,7 @@
 //
 // 分享创建也走同一层:桌面端与 H5 共用 `/api/v1/shares`(6.3),不另开一套。
 
+using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using NetDisk.ClientCore;
 
@@ -43,9 +44,13 @@ public sealed record ShareCreateRequest
 /// 所以"分享链接"由客户端按契约路由拼出来 —— 拼法集中在这里,免得各处各写一个。</summary>
 public static class ShareLinks
 {
-    /// <summary>按 6.3 的免登录路由 `/s/{token}` 拼链接。</summary>
+    /// <summary>按 6.3 的免登录路由 `/s/{token}` 拼链接(创建结果用)。</summary>
     public static string LinkFor(ShareCreated created, string baseAddress)
         => baseAddress.TrimEnd('/') + "/s/" + created.token;
+
+    /// <summary>按 token 直接拼分享落地页链接(列表项用,避免再依赖 ShareCreated)。</summary>
+    public static string LinkForToken(string token, string baseAddress)
+        => baseAddress.TrimEnd('/') + "/s/" + token;
 }
 
 /// <summary>协作与分享的客户端(H5 与桌面端同一组接口)。</summary>
@@ -104,6 +109,13 @@ public sealed class SpaceCollabClient
     /// <summary>DELETE /api/v1/shares/{id} —— 撤销分享。</summary>
     public Task<string> RevokeShareAsync(string shareId, CancellationToken ct = default)
         => _api.DeleteAsync<string>($"/api/v1/shares/{shareId}", ct);
+
+    /// <summary>GET /api/v1/shares —— 列出我创建的分享(契约包裹 { shares: ShareItem[] })。</summary>
+    public async Task<IReadOnlyList<ShareItem>> ListSharesAsync(CancellationToken ct = default)
+    {
+        var list = await _api.GetAsync<ShareList>("/api/v1/shares", ct);
+        return list.shares;
+    }
 
     /// <summary>
     /// 把服务端返回的错误变成**可展示**的文案(而不是在端上判断"我该不该做")。
