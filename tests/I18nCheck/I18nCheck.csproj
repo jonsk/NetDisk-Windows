@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    I18nCheck —— 桌面端多语言(P0~P2)的行为检查器(零额外 NuGet)。
+    P3 运行态验证 + P6 检查器的雏形,把这几句"必须真的能跑出来"的话钉死:
+      ① 中文/英文键集完全一致(缺键 = App 会回退,但那是漏译的静默信号);
+      ② 切语言**即时生效**(INotifyPropertyChanged 抬空串 = 全局刷新,无需重启);
+      ③ 持久化:language 写入 client.json、重载后保持(用临时路径,不碰真实配置);
+      ④ 回退链:未知 key 回退 key 本身;未知语言 code 回退默认中文;
+      ⑤ 复合串走 Format,占位符不乱序(Sync.Summary 六参、中英各验)。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>NetDisk.Checks.I18n</RootNamespace>
+    <AssemblyName>I18nCheck</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Localization 在 App(WPF/WinForms)里;ClientConfig 在 SyncEngine -->
+    <ProjectReference Include="..\..\src\NetDisk.App\NetDisk.App.csproj" />
+    <ProjectReference Include="..\..\src\NetDisk.SyncEngine\NetDisk.SyncEngine.csproj" />
+  </ItemGroup>
+
+</Project>

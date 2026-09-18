@@ -78,6 +78,21 @@ dotnet publish src/NetDisk.App/NetDisk.App.csproj -c Release -r win-x64 \
 
 同目录数据文件：`tokens.bin`（DPAPI 加密令牌）、`state.db`（同步状态）、`logs/client.log`。
 
+## 多语言（界面 i18n）
+
+支持**中文（默认）+ 英文**，免重启**即时切换**（2026-09-18 落地）：
+
+- **切换方式**：设置界面「界面语言」下拉选择，立即全局刷新，无需重启客户端。
+- **持久化**：语言偏好写入 `client.json` 的 `language` 字段（`zh` / `en`），重启保持；未知值回退默认中文。
+- **实现**：自研 `LocalizationService`（`INotifyPropertyChanged`），**零新增 NuGet 依赖**。
+  - 资源为**代码内字典**（`Localization/Locale.cs` 的 `BuildBase`/`BuildEn`，各 250 键，键集严格对齐），
+    非 `.resx`——避免编译出卫星程序集破坏「发布目录恰好一个 exe」铁律。
+  - XAML 用 `{Binding [Key], Source={x:Static loc:Loc.Instance}}` 即时绑定；code-behind 用户可见串走
+    `Loc.T/F`；**含占位符/动态拼接的复合串必须走 `Loc.Format`**（防中英文语序错位）。
+  - **核心层日志（`AppLog`）刻意保持中文**，不纳入本地化。
+- **回归**：`tests/I18nCheck` 覆盖键集一致 / 占位符一致 / XAML 键引用无空白 / 切语言即时生效 / 回退链 /
+  复合串格式化 / 持久化，已在 CI 接入（DE-I-01）。
+
 ## 构建（开发）
 
 ```bash
@@ -106,6 +121,7 @@ pwsh -File scripts/verify-publish.ps1
 
 ```bash
 dotnet run --project tests/UpdateCheck -c Release --nologo      # 自动更新序列（DE-D-19）
+dotnet run --project tests/I18nCheck   -c Release --nologo      # 多语言键集/即时切换/持久化（i18n / DE-I-01）
 dotnet run --project tests/NameRulesCheck -c Release --nologo   # 名字规则双端一致（DE-D-12）
 # 其余 DE-D-01 .. DE-D-21
 ```

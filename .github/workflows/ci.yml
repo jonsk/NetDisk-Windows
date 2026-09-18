@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
-      - name: dotnet build(4 个代码工程 + 20 个检查器)
+      - name: dotnet build(4 个代码工程 + 22 个检查器)
         run: dotnet build NetDisk.sln -c Release --nologo
       - name: 发布单文件 exe(框架依赖,win-x64;2026-09-17 体积决策)
         run: dotnet publish src/NetDisk.App/NetDisk.App.csproj -c Release -r win-x64 -p:PublishSingleFile=true -p:RuntimeIdentifier=win-x64 -o publish
@@ -73,6 +73,8 @@ jobs:
         run: dotnet run --project tests/UpdateCheck -c Release --nologo
       - name: 线程纪律与 soak 判定检查(DE-D-21)
         run: dotnet run --project tests/SoakCheck -c Release --nologo
+      - name: 多语言键集 / 即时切换 / 持久化检查(DE-I-01 / i18n)
+        run: dotnet run --project tests/I18nCheck -c Release --nologo
       - name: 发布产物校验(恰好一个 exe + 验活)
         run: |
           $exe = Get-ChildItem -Path publish -Filter NetDisk.App.exe | Select-Object -First 1
