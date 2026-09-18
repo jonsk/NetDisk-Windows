@@ -15,6 +15,7 @@ using System.IO;
 using System.Windows;
 using NetDisk.SyncEngine.Files;
 using NetDisk.SyncEngine.Host;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Views;
 
@@ -25,7 +26,7 @@ public sealed class RemoteRow
 
     public string Name => Entry.IsDir ? Entry.Name + "\\" : Entry.Name;
 
-    public string KindText => Entry.IsDir ? "目录" : "文件";
+    public string KindText => Entry.IsDir ? Loc.T("Remote.KindDir") : Loc.T("Remote.KindFile");
 
     public string SizeText => Entry.SizeText;
 
@@ -63,7 +64,7 @@ public partial class RemoteView : System.Windows.Controls.UserControl
         _browser = null;
         _rows.Clear();
         StatusText.Text = "";
-        PathText.Text = "位置:/";
+        PathText.Text = Loc.T("Remote.Root");
         UpButton.IsEnabled = false;
     }
 
@@ -84,13 +85,13 @@ public partial class RemoteView : System.Windows.Controls.UserControl
             {
                 _rows.Add(new RemoteRow { Entry = e });
             }
-            PathText.Text = "位置:/" + _currentPath;
+            PathText.Text = Loc.F("Remote.RootAt", _currentPath);
             UpButton.IsEnabled = _currentPath.Length > 0;
-            StatusText.Text = entries.Count == 0 ? "（这一层没有条目）" : $"共 {entries.Count} 项";
+            StatusText.Text = entries.Count == 0 ? Loc.T("Remote.EmptyHere") : Loc.F("Remote.Count", entries.Count);
         }
         catch (Exception ex)
         {
-            StatusText.Text = "列目录失败:" + ex.Message;
+            StatusText.Text = Loc.F("Remote.ListFail", ex.Message);
         }
         finally
         {
@@ -130,7 +131,7 @@ public partial class RemoteView : System.Windows.Controls.UserControl
         var parent = await _browser.FindByPathAsync(segments);
         if (parent is null)
         {
-            StatusText.Text = "上一级已经不存在了(可能被另一端删掉)——已回到空间根。";
+            StatusText.Text = Loc.T("Remote.ParentGone");
             await NavigateAsync(null, "");
             return;
         }
@@ -155,12 +156,12 @@ public partial class RemoteView : System.Windows.Controls.UserControl
     {
         if (EntryList.SelectedItem is not RemoteRow row)
         {
-            StatusText.Text = "请先在上面的列表里选中一个文件。";
+            StatusText.Text = Loc.T("Remote.PickFile");
             return;
         }
         if (row.Entry.IsDir)
         {
-            StatusText.Text = "选中的是目录 —— 双击它可以进入。";
+            StatusText.Text = Loc.T("Remote.IsDir");
             return;
         }
         await PreviewAsync(row.Entry);
@@ -173,17 +174,17 @@ public partial class RemoteView : System.Windows.Controls.UserControl
         {
             return;
         }
-        StatusText.Text = $"正在取回 {entry.Path} …";
+        StatusText.Text = Loc.F("Remote.Fetching", entry.Path);
         SetBusy(true);
         try
         {
             var local = await _browser.DownloadToTempAsync(entry);
-            StatusText.Text = $"预览副本:{local}(临时目录,不影响同步)";
+            StatusText.Text = Loc.F("Remote.PreviewCopy", local);
             Process.Start(new ProcessStartInfo(local) { UseShellExecute = true });
         }
         catch (Exception ex)
         {
-            StatusText.Text = "预览失败:" + ex.Message;
+            StatusText.Text = Loc.F("Remote.PreviewFail", ex.Message);
         }
         finally
         {

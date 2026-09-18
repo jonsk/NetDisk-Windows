@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Windows.Data;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Converters;
 
@@ -8,7 +9,7 @@ namespace NetDisk.App.Converters;
 public sealed class RevokedToStatus : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        => value is true ? "已吊销" : "有效";
+        => value is true ? Loc.T("Share.StatusRevoked") : Loc.T("Share.StatusValid");
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         => throw new NotSupportedException();
@@ -19,8 +20,8 @@ public sealed class MaxDownloadsText : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is null) return "不限";
-        if (value is long l && l <= 0) return "不限";
+        if (value is null) return Loc.T("Share.Unlimited");
+        if (value is long l && l <= 0) return Loc.T("Share.Unlimited");
         return value.ToString()!;
     }
 

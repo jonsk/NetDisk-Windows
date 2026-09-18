@@ -5,6 +5,7 @@
 
 using System.Windows;
 using NetDisk.ClientCore;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Views;
 
@@ -19,8 +20,8 @@ public partial class SpacePickWindow : Window
             var item = new System.Windows.Controls.ListBoxItem
             {
                 Content = (string.IsNullOrWhiteSpace(s.name) ? s.id : s.name)
-                          + $"  ({s.kind})"
-                          + (bound ? "  — 已绑定" : ""),
+                          + Loc.F("SpacePick.KindFmt", s.kind)
+                          + (bound ? Loc.T("SpacePick.Bound") : ""),
                 Tag = s,
                 IsEnabled = !bound,
             };
@@ -31,8 +32,8 @@ public partial class SpacePickWindow : Window
             }
         }
         HintText.Text = alreadyBound.Count == 0
-            ? "每个空间需要一个**独立**的本地目录。"
-            : $"已有 {alreadyBound.Count} 个空间绑定;已绑定的空间不再重复列出可选。";
+            ? Loc.T("SpacePick.IndependentDir")
+            : Loc.F("SpacePick.AlreadyBound", alreadyBound.Count);
     }
 
     /// <summary>用户选中的空间(取消时为 null)。</summary>
@@ -42,7 +43,7 @@ public partial class SpacePickWindow : Window
     {
         if (List.SelectedItem is not System.Windows.Controls.ListBoxItem item || item.Tag is not SpaceView s)
         {
-            HintText.Text = "请先选中一个空间。";
+            HintText.Text = Loc.T("SpacePick.PickOne");
             return;
         }
         Selected = s;

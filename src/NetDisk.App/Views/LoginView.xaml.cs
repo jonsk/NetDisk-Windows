@@ -16,6 +16,7 @@ using Microsoft.Win32;
 using NetDisk.SyncEngine.Files;
 using NetDisk.SyncEngine.Host;
 using NetDisk.SyncEngine.Onboarding;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Views;
 
@@ -48,7 +49,7 @@ public partial class LoginView : System.Windows.Controls.UserControl
         // 用系统选择框(WPF 没有原生的"选文件夹");选不到就保持原值,不报错
         var dlg = new OpenFolderDialog
         {
-            Title = "选择同步目录",
+            Title = Loc.T("Login.PickSyncDir"),
             InitialDirectory = Directory.Exists(RootBox.Text) ? RootBox.Text : null,
         };
         if (dlg.ShowDialog() == true)
@@ -66,12 +67,12 @@ public partial class LoginView : System.Windows.Controls.UserControl
 
         if (baseUrl.Length == 0 || user.Length == 0 || pass.Length == 0 || root.Length == 0)
         {
-            Fail("服务器地址、用户名、口令、同步目录都要填。");
+            Fail(Loc.T("Login.FillAll"));
             return;
         }
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out _))
         {
-            Fail("服务器地址要写成完整地址,例如 http://10.14.37.187");
+            Fail(Loc.T("Error.BadBaseUrl"));
             return;
         }
 
@@ -82,7 +83,7 @@ public partial class LoginView : System.Windows.Controls.UserControl
         LoginButton.IsEnabled = false;
         try
         {
-            Info("正在登录…");
+            Info(Loc.T("Login.LoggingIn"));
             SyncRuntime runtime;
             try
             {
@@ -90,7 +91,7 @@ public partial class LoginView : System.Windows.Controls.UserControl
             }
             catch (Exception ex)
             {
-                Fail("登录失败: " + ex.Message);
+                Fail(Loc.F("Login.LoginFail", ex.Message));
                 return;
             }
 
@@ -99,12 +100,12 @@ public partial class LoginView : System.Windows.Controls.UserControl
             // 而不是自己另写一套判断 —— 另写一套必然与引擎侧的规则漂移。
             if (!cfg.Onboarded)
             {
-                Info("正在读取服务器上的文件清单…");
+                Info(Loc.T("Login.Listing"));
                 var plan = await BuildPlanAsync(runtime, FirstSyncChoice.FullWithThrottle, root);
                 var problems = plan.Validate();
                 if (problems.Count > 0)
                 {
-                    Fail("同步目录不可用: " + string.Join(";", problems));
+                    Fail(Loc.F("Login.RootUnusable", string.Join(";", problems)));
                     await runtime.DisposeAsync();
                     return;
                 }
@@ -113,22 +114,22 @@ public partial class LoginView : System.Windows.Controls.UserControl
                 // 空空间要给一句人话:否则"0 个文件、0 个目录"看起来像出错了
                 // (服务端没有任何文件是完全正常的 —— 全新账号、或刚被清空的空间)。
                 var remoteLine = plan.RemoteTreeWasEmpty
-                    ? "服务器上还没有任何文件(这是一个空空间,正常):首次同步会把这个目录里的文件上传上去。"
-                    : $"服务器上有 {estimate?.FileCount ?? 0} 个文件、{estimate?.DirectoryCount ?? 0} 个目录," +
-                      $"合计约 {FormatSize(estimate?.TotalBytes ?? 0)}。";
+                    ? Loc.T("Login.EmptySpace")
+                    : Loc.F("Login.CountSummary",
+                        estimate?.FileCount ?? 0, estimate?.DirectoryCount ?? 0,
+                        FormatSize(estimate?.TotalBytes ?? 0));
                 var summary =
                     remoteLine + "\n\n" +
-                    $"同步目录:{root}\n" +
-                    "(首次同步会把服务器上的文件下载到该目录,并把该目录里的文件上传到服务器。)";
+                    Loc.F("Login.SyncDirSummary", root);
                 OnboardingText.Text = summary;
                 Info(summary);
 
                 var ok = System.Windows.MessageBox.Show(
-                    summary + "\n\n现在开始同步吗?", "确认首次同步",
+                    summary + "\n\n" + Loc.T("Login.ConfirmStartQuestion"), Loc.T("Login.ConfirmFirstSync"),
                     MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK;
                 if (!ok)
                 {
-                    Info("已取消:没有开始同步,也没有改动任何文件。");
+                    Info(Loc.T("Login.Cancelled"));
                     await runtime.DisposeAsync();
                     return;
                 }
@@ -137,11 +138,11 @@ public partial class LoginView : System.Windows.Controls.UserControl
 
             cfg.Save();
 
-            Info("正在启动同步…");
+            Info(Loc.T("Login.Starting"));
             var started = await runtime.StartAsync();
             if (!started)
             {
-                Fail("同步未能启动(配置不完整或令牌不可用),请重新登录。");
+                Fail(Loc.T("Login.StartFail"));
                 await runtime.DisposeAsync();
                 return;
             }
@@ -151,7 +152,7 @@ public partial class LoginView : System.Windows.Controls.UserControl
         }
         catch (Exception ex)
         {
-            Fail("发生未预期的错误: " + ex.GetType().Name + ": " + ex.Message);
+            Fail(Loc.F("Login.Unexpected", ex.GetType().Name + ": " + ex.Message));
         }
         finally
         {

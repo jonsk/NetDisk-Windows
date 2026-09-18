@@ -14,6 +14,7 @@ using NetDisk.SyncEngine;
 using NetDisk.SyncEngine.Host;
 using NetDisk.SyncEngine.Notify;
 using NetDisk.SyncEngine.Update;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App;
 
@@ -32,7 +33,7 @@ public partial class MainWindow : Window
         _tray = tray;
         InitializeComponent();
         Loaded += OnLoaded;
-        VersionText.Text = $"版本 {typeof(MainWindow).Assembly.GetName().Version}";
+        VersionText.Text = Loc.F("Main.VersionFormat", typeof(MainWindow).Assembly.GetName().Version);
         WireTray();
     }
 
@@ -111,8 +112,7 @@ public partial class MainWindow : Window
             if (!_trayHintShown)
             {
                 _trayHintShown = true;
-                _notifications.NotifyInfo("NetDisk 仍在后台同步",
-                    "窗口已隐藏到托盘;要完全退出请右键托盘图标选「退出」。");
+                _notifications.NotifyInfo(Loc.T("Main.TrayTitle"), Loc.T("Main.TrayBody"));
             }
             return;
         }
@@ -134,14 +134,14 @@ public partial class MainWindow : Window
     {
         if (_runtime is null)
         {
-            UpdateStatusText.Text = "同步还没启动,先登录再升级。";
+            UpdateStatusText.Text = Loc.T("Main.NoSyncYet");
             return;
         }
         // 限定名是必须的:本工程同时开了 UseWPF 与 UseWindowsForms(托盘),两边都有 OpenFileDialog/MessageBox/Application
         var dlg = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "选择 NetDisk 新版本程序 (NetDisk.App.exe)",
-            Filter = "NetDisk 程序 (*.exe)|*.exe",
+            Title = Loc.T("Main.PickExeTitle"),
+            Filter = Loc.T("Main.PickExeFilter"),
             CheckFileExists = true,
         };
         if (dlg.ShowDialog(this) != true)
@@ -151,15 +151,15 @@ public partial class MainWindow : Window
 
         var host = new SyncHostUpdateHost(_runtime, dlg.FileName);
         var plan = host.DescribePlan();
-        var go = System.Windows.MessageBox.Show(this, plan + "\r\n\r\n现在开始升级?", "检查更新",
+        var go = System.Windows.MessageBox.Show(this, plan + "\r\n\r\n" + Loc.T("Main.UpdateConfirmStart"), Loc.T("Main.UpdateConfirmTitle"),
             MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (go != MessageBoxResult.OK)
         {
-            UpdateStatusText.Text = "已取消(没有做任何改动)。";
+            UpdateStatusText.Text = Loc.T("Main.UpdateCancel");
             return;
         }
 
-        UpdateStatusText.Text = "正在升级(暂停同步 → 等传输跑完 → 迁移状态库 → 启动更新器换装)…";
+        UpdateStatusText.Text = Loc.T("Main.Upgrading");
         var exited = false;
         host.UpdaterLaunched += () =>
         {
@@ -179,8 +179,8 @@ public partial class MainWindow : Window
             return; // 进程正在退出,不再更新界面
         }
         UpdateStatusText.Text = outcome.Upgraded
-            ? "升级已启动:" + outcome.Reason
-            : $"这次没有升级成功({outcome.Reason});同步已恢复。";
+            ? Loc.F("Main.UpgradeStarted", outcome.Reason)
+            : Loc.F("Main.UpgradeFailed", outcome.Reason);
         AppLog.Write("update", $"升级结果:{outcome.Reason}(失败于={outcome.FailedAt?.ToString() ?? "无"} 已恢复同步={outcome.SyncResumed})");
     }
 

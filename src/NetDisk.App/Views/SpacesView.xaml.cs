@@ -14,6 +14,7 @@ using System.Windows;
 using System.Windows.Controls;
 using NetDisk.ClientCore;
 using NetDisk.Transport;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Views;
 
@@ -31,7 +32,7 @@ public partial class SpacesView : System.Windows.Controls.UserControl
         _client = TryCreateClient();
         if (_client is null)
         {
-            Status("尚未登录:请先在「同步」页填写服务器地址并登录。");
+            Status(Loc.T("Spaces.NotLoggedIn"));
             return;
         }
         _ = ReloadAsync();
@@ -71,7 +72,7 @@ public partial class SpacesView : System.Windows.Controls.UserControl
     {
         var text = ex is ApiException api ? SpaceCollabClient.DescribeFailure(api) : ex.Message;
         Status(text);
-        System.Windows.MessageBox.Show(text, "操作失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+        System.Windows.MessageBox.Show(text, Loc.T("Spaces.OpFail"), MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private async Task ReloadAsync()
@@ -85,7 +86,7 @@ public partial class SpacesView : System.Windows.Controls.UserControl
             var result = await _client.ListMineAsync();
             SpaceList.ItemsSource = result.spaces;
             SpaceList.DisplayMemberPath = nameof(SpaceView.name);
-            Status($"共 {result.total} 个空间(服务端按权限过滤)");
+            Status(Loc.F("Spaces.Count", result.total));
             if (_selected is not null)
             {
                 _selected = result.spaces.FirstOrDefault(s => s.id == _selected.id);
@@ -112,8 +113,8 @@ public partial class SpacesView : System.Windows.Controls.UserControl
         SelectedSpaceTitle.Text = _selected.name;
         // is_owner **只用于展示**:它不参与任何"要不要发请求"的判断(见文件头)
         SelectedSpaceRole.Text = _selected.is_owner == true
-            ? "你是该空间的所有者"
-            : "你在该空间中是成员(能否操作由服务端判定)";
+            ? Loc.T("Spaces.RoleOwner")
+            : Loc.T("Spaces.RoleMember");
     }
 
     private async void OnSpaceSelected(object sender, SelectionChangedEventArgs e)
@@ -139,7 +140,7 @@ public partial class SpacesView : System.Windows.Controls.UserControl
         {
             var created = await _client.CreateAsync(NewSpaceName.Text);
             NewSpaceName.Clear();
-            Status($"已创建空间:{created.name}");
+            Status(Loc.F("Spaces.Created", created.name));
             await ReloadAsync();
         }
         catch (Exception ex)
@@ -152,7 +153,7 @@ public partial class SpacesView : System.Windows.Controls.UserControl
     {
         if (_client is null || _selected is null)
         {
-            Status("请先选择一个空间。");
+            Status(Loc.T("Spaces.PickOne"));
             return;
         }
         try
@@ -160,7 +161,7 @@ public partial class SpacesView : System.Windows.Controls.UserControl
             var permission = (InvitePermission.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "reader";
             var member = await _client.InviteAsync(_selected.id, InviteUsername.Text, permission);
             InviteUsername.Clear();
-            Status($"已邀请 {member.username}({member.permission})");
+            Status(Loc.F("Spaces.Invited", member.username, member.permission));
             await LoadMembersAsync();
         }
         catch (Exception ex)
@@ -173,13 +174,13 @@ public partial class SpacesView : System.Windows.Controls.UserControl
     {
         if (_client is null || _selected is null || MemberList.SelectedItem is not MemberView member)
         {
-            Status("请先选择一个成员。");
+            Status(Loc.T("Spaces.PickMember"));
             return;
         }
         try
         {
             await _client.RemoveMemberAsync(_selected.id, member.user_id);
-            Status($"已移除 {member.username}");
+            Status(Loc.F("Spaces.RemovedMem", member.username));
             await LoadMembersAsync();
         }
         catch (Exception ex)
@@ -192,13 +193,13 @@ public partial class SpacesView : System.Windows.Controls.UserControl
     {
         if (_client is null || _selected is null)
         {
-            Status("请先选择一个空间。");
+            Status(Loc.T("Spaces.PickOne"));
             return;
         }
         try
         {
             await _client.TransferAsync(_selected.id, TransferUsername.Text);
-            Status($"已转让给 {TransferUsername.Text}");
+            Status(Loc.F("Spaces.Transferred", TransferUsername.Text));
             TransferUsername.Clear();
             await ReloadAsync();
         }
@@ -212,13 +213,13 @@ public partial class SpacesView : System.Windows.Controls.UserControl
     {
         if (_client is null || _selected is null)
         {
-            Status("请先选择一个空间。");
+            Status(Loc.T("Spaces.PickOne"));
             return;
         }
         try
         {
             await _client.LeaveAsync(_selected.id);
-            Status("已退出该空间");
+            Status(Loc.T("Spaces.Left"));
             await ReloadAsync();
         }
         catch (Exception ex)
@@ -232,19 +233,19 @@ public partial class SpacesView : System.Windows.Controls.UserControl
     {
         if (_client is null || _selected is null)
         {
-            Status("请先选择一个空间。");
+            Status(Loc.T("Spaces.PickOne"));
             return;
         }
         // 硬删二次确认:必须手输空间名(H5 同款)。这不是判权,是防误触。
         if (!string.Equals(DissolveConfirmName.Text, _selected.name, StringComparison.Ordinal))
         {
-            Status("为确认这是有意操作:请把空间名原样输入后再点解散。");
+            Status(Loc.T("Spaces.DissolveConfirm"));
             return;
         }
         try
         {
             await _client.DissolveAsync(_selected.id);
-            Status($"已解散空间:{_selected.name}(硬删,不可恢复)");
+            Status(Loc.F("Spaces.Dissolved", _selected.name));
             DissolveConfirmName.Clear();
             _selected = null;
             await ReloadAsync();
@@ -281,10 +282,10 @@ public partial class SpacesView : System.Windows.Controls.UserControl
 
             // 把服务端回显的约束原样告诉用户(免得"建完不知道限制有没有生效")
             var info = new System.Text.StringBuilder();
-            info.Append("分享已创建(免登录出口):");
-            info.Append(created.need_password ? " 已设口令;" : " 无口令;");
-            info.Append(created.expires_at == null ? " 默认7天有效;" : $" 有效期至 {created.expires_at};");
-            info.Append(created.max_downloads == null ? " 下载次数不限;" : $" 最多 {created.max_downloads} 次下载;");
+            info.Append(Loc.T("Spaces.ShareCreatedPrefix"));
+            info.Append(created.need_password ? Loc.T("Spaces.SharePwdSet") : Loc.T("Spaces.ShareNoPwd"));
+            info.Append(created.expires_at == null ? Loc.T("Spaces.Share7d") : Loc.F("Spaces.ShareExpiresAt", created.expires_at));
+            info.Append(created.max_downloads == null ? Loc.T("Spaces.ShareUnlimited") : Loc.F("Spaces.ShareMaxDownloads", created.max_downloads));
             Status(info.ToString());
         }
         catch (Exception ex)

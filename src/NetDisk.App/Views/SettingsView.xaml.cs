@@ -12,6 +12,7 @@
 using System.IO;
 using System.Windows;
 using Microsoft.Win32;
+using NetDisk.App.Localization;
 using NetDisk.SyncEngine.Host;
 
 namespace NetDisk.App.Views;
@@ -48,12 +49,42 @@ public partial class SettingsView : System.Windows.Controls.UserControl
             "keep_remote" => 2,
             _ => 0, // 未知值/默认 = 都保留(与引擎的归一化一致:未知一律落到"不丢数据"那条)
         };
-        PathText.Text = $"配置文件:{runtime.Config.Path}\n" +
-                        $"数据目录:{ClientPaths.DataDirectory}" +
-                        (ClientPaths.FallbackReason is { } why ? $" (回退:{why})" : "");
+        PathText.Text = Loc.F("Settings.PathFormat", runtime.Config.Path, ClientPaths.DataDirectory) +
+                        (ClientPaths.FallbackReason is { } why ? Loc.F("Settings.PathFallback", why) : "");
         _runtime = runtime;
         ReloadSpaceList();
+        LanguageCombo.ItemsSource = Locale.Languages.Select(l => l.SelfName).ToList();
+        LanguageCombo.SelectedIndex = GetLanguageIndex(Loc.Current);
         StatusText.Text = "";
+    }
+
+    private static int GetLanguageIndex(string code) =>
+        code switch
+        {
+            "en" => 1,
+            _ => 0,
+        };
+
+    /// <summary>语言切换:立即生效 + 写回 client.json 持久化。</summary>
+    private void OnLanguageChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (_config is null || LanguageCombo.SelectedIndex < 0)
+        {
+            return;
+        }
+        var code = LanguageCombo.SelectedIndex switch
+        {
+            1 => "en",
+            _ => "zh",
+        };
+        if (string.Equals(code, Loc.Current, StringComparison.Ordinal))
+        {
+            return;
+        }
+        Loc.Instance.Code = code;              // 即时全局刷新(免重启)
+        _config.Language = code;               // 持久化
+        _config.Save();
+        AppLog.Write("app", $"界面语言已切换:{code}");
     }
 
     // ---------------------------------------------------------------- 多空间(绑定管理)
@@ -113,12 +144,12 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         }
         catch (Exception ex)
         {
-            Fail("取空间列表失败:" + ex.Message);
+            Fail(Loc.F("Error.AddSpaceList", ex.Message));
             return;
         }
         if (spaces.Count == 0)
         {
-            Fail("这个账号没有可见空间。");
+            Fail(Loc.T("Error.NoSpaces"));
             return;
         }
 
@@ -137,7 +168,7 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         }
         if (IsRootAlreadyBound(folder.FolderName, pick.Selected.id, out var clash))
         {
-            Fail($"这个目录已经绑给另一个空间了:{clash}。请为每个空间选不同的目录。");
+            Fail(Loc.F("Error.DirBound", clash));
             return;
         }
 
@@ -151,7 +182,7 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         AppLog.Write("app", $"已添加空间绑定:{pick.Selected.id} → {folder.FolderName}(重启同步后生效)");
         ReloadSpaceList();
         StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
-        StatusText.Text = "已添加。点「保存并重启同步」后按新配置生效。";
+        StatusText.Text = Loc.T("Settings.StatusAdded");
     }
 
     /// <summary>移除选中的绑定(只解除绑定,不删本地文件)。</summary>
@@ -160,7 +191,7 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         if (_config is null || SpaceList.SelectedIndex < 0)
         {
             StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
-            StatusText.Text = "请先在上面选中一条绑定。";
+            StatusText.Text = Loc.T("Settings.StatusPickBinding");
             return;
         }
         var bindings = _config.EffectiveBindings.ToList();
@@ -168,7 +199,7 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         // 允许多空间的同时不破坏老配置的语义 —— 想换主空间就改上面的"同步目录"。
         if (SpaceList.SelectedIndex == 0)
         {
-            Fail("第一条是**主空间**(对应上面的服务器/同步目录设置),不能在这里移除;请先移除其它空间。");
+            Fail(Loc.T("Error.CannotRemovePrimary"));
             return;
         }
         var victim = bindings[SpaceList.SelectedIndex];
@@ -178,7 +209,7 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         AppLog.Write("app", $"已移除空间绑定:{victim.SpaceId} → {victim.SyncRoot}(本地文件未删除)");
         ReloadSpaceList();
         StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
-        StatusText.Text = "已移除(本地文件没有删除)。点「保存并重启同步」后生效。";
+        StatusText.Text = Loc.T("Settings.StatusRemoved");
     }
 
     private bool IsRootAlreadyBound(string root, string spaceId, out string clash)
@@ -219,33 +250,33 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         var root = RootBox.Text.Trim();
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out _))
         {
-            Fail("服务器地址要写成完整地址,例如 http://10.14.37.187");
+            Fail(Loc.T("Error.BadBaseUrl"));
             return;
         }
         if (root.Length == 0)
         {
-            Fail("同步目录不能为空");
+            Fail(Loc.T("Error.EmptyRoot"));
             return;
         }
         if (!int.TryParse(ConcurrencyBox.Text.Trim(), out var concurrency))
         {
-            Fail("并发数要填数字(1-16)");
+            Fail(Loc.T("Error.BadConcurrency"));
             return;
         }
         if (!int.TryParse(UploadBox.Text.Trim(), out var upKbps) ||
             !int.TryParse(DownloadBox.Text.Trim(), out var downKbps))
         {
-            Fail("限速要填数字(KB/s,0 = 不限速)");
+            Fail(Loc.T("Error.BadRateLimit"));
             return;
         }
         if (concurrency < 1 || concurrency > 16)
         {
-            Fail("并发数必须在 1..16(0 会让队列永不执行;过大把机器与带宽打满)");
+            Fail(Loc.T("Error.ConcurrencyRange"));
             return;
         }
         if (upKbps < 0 || downKbps < 0)
         {
-            Fail("限速不能为负(0 = 不限速)");
+            Fail(Loc.T("Error.NegativeRate"));
             return;
         }
 
@@ -272,15 +303,15 @@ public partial class SettingsView : System.Windows.Controls.UserControl
                 $"上行限速={upKbps}KB/s 下行限速={downKbps}KB/s 日志={_config.Logging} " +
                 $"只读浏览(仅结构)={_config.StructureOnly} 冲突策略={_config.OnConflict}");
 
-            StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
-            StatusText.Text = "正在按新配置重启同步…";
-            await RestartRequested(_config);
-            StatusText.Text = "已按新配置重启同步。";
+        StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
+        StatusText.Text = Loc.T("Settings.StatusRestarting");
+        await RestartRequested(_config);
+        StatusText.Text = Loc.T("Settings.StatusRestarted");
             AppLog.Write("app", "已按新配置重启同步");
         }
         catch (Exception ex)
         {
-            Fail("重启同步失败: " + ex.Message);
+            Fail(Loc.F("Error.RestartFail", ex.Message));
             AppLog.Write("app", $"重启同步失败: {ex}");
         }
         finally
@@ -296,8 +327,8 @@ public partial class SettingsView : System.Windows.Controls.UserControl
             return;
         }
         var ok = System.Windows.MessageBox.Show(
-            "退出登录会吊销服务器上的登录状态并删除本机令牌(文件不会被删除)。继续吗?",
-            "退出登录", MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK;
+            Loc.T("Error.LogoutConfirmMsg"),
+            Loc.T("Error.LogoutTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK;
         if (!ok)
         {
             return;
@@ -306,12 +337,12 @@ public partial class SettingsView : System.Windows.Controls.UserControl
         try
         {
             StatusText.Foreground = System.Windows.Media.Brushes.DimGray;
-            StatusText.Text = "正在退出登录…";
+            StatusText.Text = Loc.T("Settings.StatusRestarting"); // 复用"正在…"提示文案(登出也用进度语义)
             await LogoutRequested();
         }
         catch (Exception ex)
         {
-            Fail("退出登录失败: " + ex.Message);
+            Fail(Loc.F("Error.LogoutFail", ex.Message));
             AppLog.Write("app", $"退出登录失败: {ex}");
         }
         finally

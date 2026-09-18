@@ -5,6 +5,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:local="clr-namespace:NetDisk.App.Views"
              xmlns:conv="clr-namespace:NetDisk.App.Converters"
+             xmlns:loc="clr-namespace:NetDisk.App.Localization"
              mc:Ignorable="d">
   <UserControl.Resources>
     <conv:RevokedToStatus x:Key="RevokedToStatus" />
@@ -19,37 +20,39 @@
     </Grid.RowDefinitions>
 
     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-      <Button x:Name="RefreshButton" Content="刷新" Padding="12,4" Click="OnRefresh" />
+      <Button x:Name="RefreshButton"
+              Content="{Binding [Shares.Refresh], Source={x:Static loc:Loc.Instance}}"
+              Padding="12,4" Click="OnRefresh" />
       <TextBlock x:Name="StatusText" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="#666" />
     </StackPanel>
 
     <ListView x:Name="SharesList" Grid.Row="1">
       <ListView.View>
         <GridView>
-          <GridViewColumn Header="名称" Width="200" DisplayMemberBinding="{Binding name}" />
-          <GridViewColumn Header="状态" Width="70">
+          <GridViewColumn Header="{Binding [Shares.ColName], Source={x:Static loc:Loc.Instance}}" Width="200" DisplayMemberBinding="{Binding name}" />
+          <GridViewColumn Header="{Binding [Shares.ColStatus], Source={x:Static loc:Loc.Instance}}" Width="70">
             <GridViewColumn.CellTemplate>
               <DataTemplate>
                 <TextBlock Text="{Binding revoked, Converter={StaticResource RevokedToStatus}}" />
               </DataTemplate>
             </GridViewColumn.CellTemplate>
           </GridViewColumn>
-          <GridViewColumn Header="有效期至" Width="160" DisplayMemberBinding="{Binding expires_at}" />
-          <GridViewColumn Header="已下载" Width="70" DisplayMemberBinding="{Binding download_count}" />
-          <GridViewColumn Header="上限" Width="70">
+          <GridViewColumn Header="{Binding [Shares.ColExpires], Source={x:Static loc:Loc.Instance}}" Width="160" DisplayMemberBinding="{Binding expires_at}" />
+          <GridViewColumn Header="{Binding [Shares.ColDownloaded], Source={x:Static loc:Loc.Instance}}" Width="70" DisplayMemberBinding="{Binding download_count}" />
+          <GridViewColumn Header="{Binding [Shares.ColLimit], Source={x:Static loc:Loc.Instance}}" Width="70">
             <GridViewColumn.CellTemplate>
               <DataTemplate>
                 <TextBlock Text="{Binding max_downloads, Converter={StaticResource MaxDownloadsText}}" />
               </DataTemplate>
             </GridViewColumn.CellTemplate>
           </GridViewColumn>
-          <GridViewColumn Header="操作" Width="170">
+          <GridViewColumn Header="{Binding [Shares.ColActions], Source={x:Static loc:Loc.Instance}}" Width="170">
             <GridViewColumn.CellTemplate>
               <DataTemplate>
                 <StackPanel Orientation="Horizontal">
-                  <Button Content="复制链接" Tag="{Binding}" Click="OnCopyLink" Padding="6,2" Margin="0,0,4,0" />
-                  <Button Content="打开" Tag="{Binding}" Click="OnOpenLink" Padding="6,2" Margin="0,0,4,0" />
-                  <Button Content="吊销" Tag="{Binding}" Click="OnRevoke" Padding="6,2" />
+                  <Button Content="{Binding [Shares.CopyLink], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnCopyLink" Padding="6,2" Margin="0,0,4,0" />
+                  <Button Content="{Binding [Shares.Open], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnOpenLink" Padding="6,2" Margin="0,0,4,0" />
+                  <Button Content="{Binding [Shares.Revoke], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnRevoke" Padding="6,2" />
                 </StackPanel>
               </DataTemplate>
             </GridViewColumn.CellTemplate>
@@ -59,6 +62,6 @@
     </ListView>
 
     <TextBlock Grid.Row="2" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap"
-               Text="「我的分享」列出你创建的所有分享链接。吊销后链接立即失效且不可恢复;复制/打开始终指向免登录落地页 /s/{token}。" />
+               Text="{Binding [Shares.Footer], Source={x:Static loc:Loc.Instance}}" />
   </Grid>
 </UserControl>

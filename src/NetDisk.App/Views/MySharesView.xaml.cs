@@ -12,6 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 using NetDisk.ClientCore;
 using NetDisk.Transport;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Views;
 
@@ -32,7 +33,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         }
         else
         {
-            Status("尚未登录:请先在「同步」页填写服务器地址并登录。");
+            Status(Loc.T("Shares.NotLoggedIn"));
         }
     }
 
@@ -75,7 +76,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
     {
         if (_client is null)
         {
-            Status("尚未登录:请先在「同步」页登录。");
+            Status(Loc.T("Shares.NotLoggedIn"));
             return;
         }
         try
@@ -86,7 +87,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
             {
                 _items.Add(s);
             }
-            Status(_items.Count == 0 ? "你还没有创建任何分享链接。" : $"共 {_items.Count} 条分享");
+            Status(_items.Count == 0 ? Loc.T("Shares.Empty") : Loc.F("Shares.Count", _items.Count));
         }
         catch (ApiException ex)
         {
@@ -94,7 +95,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         }
         catch (Exception ex)
         {
-            Status($"加载失败:{ex.Message}");
+            Status(Loc.F("Shares.LoadFail", ex.Message));
         }
     }
 
@@ -108,8 +109,8 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         }
         var name = item.name ?? item.token;
         if (System.Windows.MessageBox.Show(
-                $"确定吊销分享「{name}」?\n吊销后该链接立即失效且不可恢复。",
-                "吊销确认", System.Windows.MessageBoxButton.OKCancel, System.Windows.MessageBoxImage.Warning)
+                Loc.F("Shares.RevokeConfirmBody", name),
+                Loc.T("Shares.RevokeConfirmTitle"), System.Windows.MessageBoxButton.OKCancel, System.Windows.MessageBoxImage.Warning)
             != System.Windows.MessageBoxResult.OK)
         {
             return;
@@ -118,7 +119,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         {
             await _client.RevokeShareAsync(item.id);
             _items.Remove(item);
-            Status($"已吊销「{name}」");
+            Status(Loc.F("Shares.RevokedName", name));
         }
         catch (ApiException ex)
         {
@@ -126,7 +127,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         }
         catch (Exception ex)
         {
-            Status($"吊销失败:{ex.Message}");
+            Status(Loc.F("Shares.RevokeFail", ex.Message));
         }
     }
 
@@ -138,7 +139,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         }
         var link = ShareLinks.LinkForToken(item.token, CurrentBaseUrl());
         System.Windows.Clipboard.SetText(link);
-        Status("链接已复制到剪贴板");
+        Status(Loc.T("Shares.Copied"));
     }
 
     private void OnOpenLink(object sender, RoutedEventArgs e)
@@ -154,7 +155,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         }
         catch (Exception ex)
         {
-            Status($"无法打开链接:{ex.Message}");
+            Status(Loc.F("Shares.OpenFail", ex.Message));
         }
     }
 }

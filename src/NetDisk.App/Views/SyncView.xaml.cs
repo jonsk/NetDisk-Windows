@@ -14,6 +14,7 @@ using System.Windows;
 using System.Windows.Controls;
 using NetDisk.SyncEngine;
 using NetDisk.SyncEngine.Host;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Views;
 
@@ -59,14 +60,14 @@ public partial class SyncView : System.Windows.Controls.UserControl
         runtime.Host.Notice += OnNotice;
 
         AccountText.Text =
-            $"账号 {runtime.Config.LastLogin} @ {runtime.Config.BaseUrl}    同步目录 {runtime.Config.SyncRoot}";
+            Loc.F("Sync.AccountLine", runtime.Config.LastLogin, runtime.Config.BaseUrl, runtime.Config.SyncRoot);
 
         // 日志开关与路径:开关状态来自配置(默认开),切换即写回配置。
         _suppressLogToggle = true;
         LogToggle.IsChecked = runtime.Config.Logging;
         _suppressLogToggle = false;
         AppLog.Enabled = runtime.Config.Logging;
-        LogPathText.Text = $"日志文件:{AppLog.DefaultPath()}(默认启用;关掉后不再记录,便于对照复现)";
+        LogPathText.Text = Loc.F("Sync.LogPathDefault", AppLog.DefaultPath());
 
         Render(runtime.Host.Status);
         LogStatusTransitions(runtime.Host.Status, initial: true);
@@ -85,8 +86,8 @@ public partial class SyncView : System.Windows.Controls.UserControl
         _runtime.Config.Logging = on;
         _runtime.Config.Save();
         LogPathText.Text = on
-            ? $"日志文件:{AppLog.DefaultPath()}(已启用)"
-            : $"日志已关闭(此前记录在 {AppLog.DefaultPath()};重新勾选即继续)";
+            ? Loc.F("Sync.LogPathOn", AppLog.DefaultPath())
+            : Loc.F("Sync.LogPathOff", AppLog.DefaultPath());
     }
 
     private void OnOpenLog(object sender, RoutedEventArgs e) => OpenLogFile();
@@ -99,14 +100,14 @@ public partial class SyncView : System.Windows.Controls.UserControl
         {
             if (!File.Exists(path))
             {
-                System.Windows.MessageBox.Show($"日志还没生成:{path}\n(勾选「记录日志」后产生)");
+                System.Windows.MessageBox.Show(Loc.F("Sync.NoLogYet", path));
                 return;
             }
             Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"") { UseShellExecute = true });
         }
         catch (Exception ex)
         {
-            System.Windows.MessageBox.Show("打开日志失败: " + ex.Message + "\n" + path);
+            System.Windows.MessageBox.Show(Loc.F("Sync.OpenLogFail", ex.Message, path));
         }
     }
 
@@ -177,29 +178,29 @@ public partial class SyncView : System.Windows.Controls.UserControl
     {
         if (_runtime is null)
         {
-            NoticeText.Text = "同步还没启动,无法处理冲突。";
+            NoticeText.Text = Loc.T("Sync.NoSyncConflict");
             return;
         }
         if (StatusList.SelectedItem is not SyncRow row || !row.IsConflict)
         {
-            NoticeText.Text = "请先在上面的列表里**选中一行「冲突」**,再点这个按钮。";
+            NoticeText.Text = Loc.T("Sync.PickConflictFirst");
             return;
         }
-        NoticeText.Text = $"正在按「{choiceText}」处理 {row.File}…";
+        NoticeText.Text = Loc.F("Sync.ResolvingChoice", choiceText, row.File);
         var ok = await _runtime.Host.ResolveConflictAsync(row.File, choice);
         NoticeText.Text = ok
-            ? $"已按「{choiceText}」处理 {row.File}。"
-            : $"{row.File} 处理不了(可能是上一次运行留下的冲突):请手动比对本地副本与服务器上的版本。";
+            ? Loc.F("Sync.ResolvedChoice", choiceText, row.File)
+            : Loc.F("Sync.ResolveUnhandlable", row.File);
     }
 
     private async void OnResolveKeepLocal(object sender, RoutedEventArgs e) =>
-        await ResolveAsync(ConflictResolution.KeepLocal, "以本地为准");
+        await ResolveAsync(ConflictResolution.KeepLocal, Loc.T("Sync.ChoiceKeepLocal"));
 
     private async void OnResolveKeepRemote(object sender, RoutedEventArgs e) =>
-        await ResolveAsync(ConflictResolution.KeepRemote, "以远端为准");
+        await ResolveAsync(ConflictResolution.KeepRemote, Loc.T("Sync.ChoiceKeepRemote"));
 
     private async void OnResolveKeepBoth(object sender, RoutedEventArgs e) =>
-        await ResolveAsync(ConflictResolution.KeepBoth, "都保留");
+        await ResolveAsync(ConflictResolution.KeepBoth, Loc.T("Sync.ChoiceKeepBoth"));
 
     private void Render(IReadOnlyList<SyncEntryStatus> status)
     {
@@ -242,9 +243,9 @@ public partial class SyncView : System.Windows.Controls.UserControl
         var structureOnly = status.Count(s => s.State == SyncState.StructureOnly);
 
         SummaryText.Text = status.Count == 0
-            ? "尚无文件(同步目录为空,或还没完成第一次对账)"
-            : $"共 {status.Count} 个文件:已同步 {synced} · 上传中 {uploading} · 下载中 {downloading} · 冲突 {conflicts} · 错误 {errors}"
-              + (structureOnly > 0 ? $" · 仅结构(未搬内容){structureOnly}" : "");
+            ? Loc.T("Sync.NoFiles")
+            : Loc.F("Sync.Summary", status.Count, synced, uploading, downloading, conflicts, errors)
+              + (structureOnly > 0 ? Loc.F("Sync.SummaryStructureOnly", structureOnly) : "");
     }
 
     private void OnStatusSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) =>
@@ -267,33 +268,33 @@ public partial class SyncView : System.Windows.Controls.UserControl
 
         if (row is null)
         {
-            ConflictHintText.Text = "先在下面的列表里点一行「冲突」";
+            ConflictHintText.Text = Loc.T("Sync.ConflictPickHint");
             return;
         }
         if (!row.IsConflict)
         {
-            ConflictHintText.Text = $"选中的是「{row.StateText}」的 {row.File} —— 冲突处理只对「冲突」行生效";
+            ConflictHintText.Text = Loc.F("Sync.ConflictSelected", row.StateText, row.File);
             return;
         }
         // 冲突行:顺带告诉用户"这次能不能自动处理"(引擎是否还记得本地副本在哪 —— 见 ResolveConflictAsync)
         var resolvable = _runtime?.Host.CanResolveConflict(row.File) ?? false;
         ConflictHintText.Text = resolvable
-            ? $"已选中冲突:{row.File}"
-            : $"已选中冲突:{row.File} —— 本地副本位置没有记录(可能来自上一次运行);点按钮会说明怎么手动处理";
+            ? Loc.F("Sync.ConflictSelectedNow", row.File)
+            : Loc.F("Sync.ConflictSelectedNoLocal", row.File);
     }
 
     /// <summary>状态 → 中文。纯展示映射:引擎加状态时这里必须跟着加(编译器会提醒)。</summary>
     private static string Describe(SyncState state) => state switch
     {
-        SyncState.InSync => "已同步",
-        SyncState.PendingUpload => "上传中",
-        SyncState.PendingDownload => "下载中",
-        SyncState.Conflict => "冲突",
-        SyncState.PendingRemoteGone => "远端已删除",
-        SyncState.SpaceRevoked => "空间已移除",
-        SyncState.PermissionLimited => "权限受限",
-        SyncState.Failed => "失败",
-        SyncState.StructureOnly => "仅结构",
+        SyncState.InSync => Loc.T("State.Synced"),
+        SyncState.PendingUpload => Loc.T("State.Uploading"),
+        SyncState.PendingDownload => Loc.T("State.Downloading"),
+        SyncState.Conflict => Loc.T("State.Conflict"),
+        SyncState.PendingRemoteGone => Loc.T("State.RemoteDeleted"),
+        SyncState.SpaceRevoked => Loc.T("State.SpaceRemoved"),
+        SyncState.PermissionLimited => Loc.T("State.Permission"),
+        SyncState.Failed => Loc.T("State.Failed"),
+        SyncState.StructureOnly => Loc.T("State.StructureOnly"),
         _ => state.ToString(),
     };
 
@@ -309,23 +310,23 @@ public partial class SyncView : System.Windows.Controls.UserControl
             if (_runtime.Host.IsPaused)
             {
                 await _runtime.Host.ResumeAsync();
-                PauseButton.Content = "暂停同步";
-                NoticeText.Text = "已恢复同步";
+                PauseButton.Content = Loc.T("Sync.Pause");
+                NoticeText.Text = Loc.T("Sync.Resumed");
             }
             else
             {
                 await _runtime.Host.PauseAsync();
-                PauseButton.Content = "继续同步";
+                PauseButton.Content = Loc.T("Sync.Resume");
                 // 暂停后不会再有 StatusChanged 事件,所以在这里明确写一次界面状态,
                 // 否则用户看到的是"最后一轮的旧状态" + 一个变成"继续同步"的按钮(自相矛盾)。
-                SummaryText.Text = "已暂停:不再对账与传输(数据未改动)。点「继续同步」恢复。";
-                NoticeText.Text = "已暂停";
+                SummaryText.Text = Loc.T("Sync.PausedSummary");
+                NoticeText.Text = Loc.T("Sync.Paused");
             }
-            AppLog.Write("app", PauseButton.Content?.ToString() == "继续同步" ? "用户暂停了同步" : "用户恢复了同步");
+            AppLog.Write("app", PauseButton.Content?.ToString() == Loc.T("Sync.Resume") ? "用户暂停了同步" : "用户恢复了同步");
         }
         catch (Exception ex)
         {
-            NoticeText.Text = "暂停/恢复失败: " + ex.Message;
+            NoticeText.Text = Loc.F("Sync.PauseFail", ex.Message);
             AppLog.Write("app", $"暂停/恢复失败: {ex}");
         }
         finally
@@ -343,13 +344,13 @@ public partial class SyncView : System.Windows.Controls.UserControl
         SyncNowButton.IsEnabled = false;
         try
         {
-            NoticeText.Text = "正在对账…";
+            NoticeText.Text = Loc.T("Sync.Syncing");
             await _runtime.ReconcileAsync();
-            NoticeText.Text = "对账完成";
+            NoticeText.Text = Loc.T("Sync.Done");
         }
         catch (Exception ex)
         {
-            NoticeText.Text = "对账失败: " + ex.Message;
+            NoticeText.Text = Loc.F("Sync.SyncFail", ex.Message);
         }
         finally
         {
@@ -365,7 +366,7 @@ public partial class SyncView : System.Windows.Controls.UserControl
         var root = _runtime?.Config.SyncRoot;
         if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
         {
-            System.Windows.MessageBox.Show("同步目录还不存在:" + (root ?? "(未配置)"));
+            System.Windows.MessageBox.Show(Loc.F("Sync.RootMissing", root ?? Loc.T("Sync.RootUnset")));
             return;
         }
         try
@@ -374,7 +375,7 @@ public partial class SyncView : System.Windows.Controls.UserControl
         }
         catch (Exception ex)
         {
-            System.Windows.MessageBox.Show("打开目录失败: " + ex.Message);
+            System.Windows.MessageBox.Show(Loc.F("Sync.OpenFolderFail", ex.Message));
         }
     }
 }

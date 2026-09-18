@@ -22,6 +22,7 @@ using System.Windows.Forms;
 using System.Windows.Threading;
 using NetDisk.SyncEngine.Diag;
 using NetDisk.SyncEngine.Notify;
+using NetDisk.App.Localization;
 
 namespace NetDisk.App.Notify;
 
@@ -83,16 +84,16 @@ public sealed class TrayNotifier : IDisposable
     private void BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add(new ToolStripMenuItem("打开主界面", null, (_, _) => ShowRequested?.Invoke()));
-        menu.Items.Add(new ToolStripMenuItem("立即同步", null, (_, _) => SyncNowRequested?.Invoke()));
-        _pauseItem = new ToolStripMenuItem("暂停同步", null,
+        menu.Items.Add(new ToolStripMenuItem(Loc.T("Tray.OpenMain"), null, (_, _) => ShowRequested?.Invoke()));
+        menu.Items.Add(new ToolStripMenuItem(Loc.T("Sync.SyncNow"), null, (_, _) => SyncNowRequested?.Invoke()));
+        _pauseItem = new ToolStripMenuItem(Loc.T("Sync.Pause"), null,
             (_, _) => TogglePauseRequested?.Invoke(!_paused));
         menu.Items.Add(_pauseItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("打开同步目录", null, (_, _) => OpenFolderRequested?.Invoke()));
-        menu.Items.Add(new ToolStripMenuItem("打开日志", null, (_, _) => OpenLogRequested?.Invoke()));
+        menu.Items.Add(new ToolStripMenuItem(Loc.T("Sync.OpenFolder"), null, (_, _) => OpenFolderRequested?.Invoke()));
+        menu.Items.Add(new ToolStripMenuItem(Loc.T("Sync.OpenLog"), null, (_, _) => OpenLogRequested?.Invoke()));
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("退出", null, (_, _) => ExitRequested?.Invoke()));
+        menu.Items.Add(new ToolStripMenuItem(Loc.T("Tray.Quit"), null, (_, _) => ExitRequested?.Invoke()));
         _icon.ContextMenuStrip = menu;
     }
 
@@ -104,7 +105,7 @@ public sealed class TrayNotifier : IDisposable
         _paused = paused;
         if (_pauseItem is not null)
         {
-            _pauseItem.Text = paused ? "继续同步" : "暂停同步";
+            _pauseItem.Text = paused ? Loc.T("Sync.Resume") : Loc.T("Sync.Pause");
         }
     }
 
