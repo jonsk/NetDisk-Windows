@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.Windows;
+using NetDisk.App.Localization;
 using NetDisk.App.Notify;
 using NetDisk.SyncEngine.Diag;
 using NetDisk.SyncEngine.Host;
@@ -64,6 +65,11 @@ public partial class App : System.Windows.Application
         {
             cfg.Save();
         }
+
+        // 多语言(2026-09-18):按 client.json 的 language 初始化,必须在任何 UI 前装配
+        // (否则界面第一次渲染就用默认中文)。空/未知值归一化回 zh。
+        Loc.Init(cfg.Language);
+
         AppLog.Enabled = cfg.Logging;
         AppLog.WriteSessionHeader(BuildVersion(), cfgPath, cfg);
         if (firstRun)

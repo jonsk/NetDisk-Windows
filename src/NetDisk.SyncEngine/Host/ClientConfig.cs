@@ -45,12 +45,13 @@ public sealed class ClientConfig
     public bool Onboarded { get; set; }
 
     /// <summary>
-    /// 是否记录日志(界面上的开关;**默认开**)。
-    ///
-    /// 默认开的理由:客户端出问题时现场在**用户机器上**,而"默认关掉"意味着
-    /// 用户来反馈时手上什么都没有,只能让他复现一次。日志是本地文件、不含口令与令牌,
-    /// 代价只有几十 KB —— 用"可能要用户复现一次"换这点磁盘不划算。
+    /// 界面语言(2026-09-18 多语言)。取值 `zh`(默认)/ `en`;空即默认中文。
+    /// 写入 client.json 持久化,启动时 App 据此初始化 Localization。
     /// </summary>
+    [JsonPropertyName("language")]
+    public string Language { get; set; } = "";
+
+    /// <summary>是否记录日志(界面上的开关;**默认开**)。</summary>
     [JsonPropertyName("logging")]
     public bool Logging { get; set; } = true;
 
@@ -98,6 +99,7 @@ public sealed class ClientConfig
         "upload_kbps/download_kbps=限速(KB/s,0=不限);logging=是否记录日志(日志在 logs\\client.log);" +
         "structure_only=只读浏览(仅结构,不下载/不上传/不删);" +
         "on_conflict=冲突策略(keep_both=都保留[默认]/keep_local=以本地为准/keep_remote=以远端为准);" +
+        "language=界面语言(zh=中文[默认]/en=English);" +
         "onboarded=是否已完成首次运行。删掉本文件会在下次启动时重新生成。";
 
     [JsonIgnore]
