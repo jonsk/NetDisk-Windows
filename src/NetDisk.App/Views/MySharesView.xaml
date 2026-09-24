@@ -12,56 +12,63 @@
     <conv:MaxDownloadsText x:Key="MaxDownloadsText" />
   </UserControl.Resources>
 
-  <Grid Margin="12">
+  <Grid Margin="20">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
-    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-      <Button x:Name="RefreshButton"
-              Content="{Binding [Shares.Refresh], Source={x:Static loc:Loc.Instance}}"
-              Padding="12,4" Click="OnRefresh" />
-      <TextBlock x:Name="StatusText" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="#666" />
+    <!-- 工具栏 -->
+    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+      <Button x:Name="RefreshButton" Style="{StaticResource PrimaryButton}" Padding="14,8" Click="OnRefresh">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE72C;" FontSize="14" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding [Shares.Refresh], Source={x:Static loc:Loc.Instance}}" Margin="7,0,0,0" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+      <TextBlock x:Name="StatusText" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource TextSecondary}" />
     </StackPanel>
 
-    <ListView x:Name="SharesList" Grid.Row="1">
-      <ListView.View>
-        <GridView>
-          <GridViewColumn Header="{Binding [Shares.ColName], Source={x:Static loc:Loc.Instance}}" Width="200" DisplayMemberBinding="{Binding name}" />
-          <GridViewColumn Header="{Binding [Shares.ColStatus], Source={x:Static loc:Loc.Instance}}" Width="70">
-            <GridViewColumn.CellTemplate>
-              <DataTemplate>
-                <TextBlock Text="{Binding revoked, Converter={StaticResource RevokedToStatus}}" />
-              </DataTemplate>
-            </GridViewColumn.CellTemplate>
-          </GridViewColumn>
-          <GridViewColumn Header="{Binding [Shares.ColExpires], Source={x:Static loc:Loc.Instance}}" Width="160" DisplayMemberBinding="{Binding expires_at}" />
-          <GridViewColumn Header="{Binding [Shares.ColDownloaded], Source={x:Static loc:Loc.Instance}}" Width="70" DisplayMemberBinding="{Binding download_count}" />
-          <GridViewColumn Header="{Binding [Shares.ColLimit], Source={x:Static loc:Loc.Instance}}" Width="70">
-            <GridViewColumn.CellTemplate>
-              <DataTemplate>
-                <TextBlock Text="{Binding max_downloads, Converter={StaticResource MaxDownloadsText}}" />
-              </DataTemplate>
-            </GridViewColumn.CellTemplate>
-          </GridViewColumn>
-          <GridViewColumn Header="{Binding [Shares.ColActions], Source={x:Static loc:Loc.Instance}}" Width="170">
-            <GridViewColumn.CellTemplate>
-              <DataTemplate>
-                <StackPanel Orientation="Horizontal">
-                  <Button Content="{Binding [Shares.CopyLink], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnCopyLink" Padding="6,2" Margin="0,0,4,0" />
-                  <Button Content="{Binding [Shares.Open], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnOpenLink" Padding="6,2" Margin="0,0,4,0" />
-                  <Button Content="{Binding [Shares.Revoke], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnRevoke" Padding="6,2" />
-                </StackPanel>
-              </DataTemplate>
-            </GridViewColumn.CellTemplate>
-          </GridViewColumn>
-        </GridView>
-      </ListView.View>
-    </ListView>
+    <!-- 分享列表 -->
+    <Border Grid.Row="1" Style="{StaticResource Card}" Padding="0">
+      <ListView x:Name="SharesList" BorderThickness="0" Background="{StaticResource Surface}">
+        <ListView.View>
+          <GridView>
+            <GridViewColumn Header="{Binding [Shares.ColName], Source={x:Static loc:Loc.Instance}}" Width="190" DisplayMemberBinding="{Binding name}" />
+            <GridViewColumn Header="{Binding [Shares.ColStatus], Source={x:Static loc:Loc.Instance}}" Width="70">
+              <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding revoked, Converter={StaticResource RevokedToStatus}}" />
+                </DataTemplate>
+              </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+            <GridViewColumn Header="{Binding [Shares.ColExpires], Source={x:Static loc:Loc.Instance}}" Width="160" DisplayMemberBinding="{Binding expires_at}" />
+            <GridViewColumn Header="{Binding [Shares.ColDownloaded], Source={x:Static loc:Loc.Instance}}" Width="70" DisplayMemberBinding="{Binding download_count}" />
+            <GridViewColumn Header="{Binding [Shares.ColLimit], Source={x:Static loc:Loc.Instance}}" Width="72">
+              <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding max_downloads, Converter={StaticResource MaxDownloadsText}}" />
+                </DataTemplate>
+              </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+            <GridViewColumn Header="{Binding [Shares.ColActions], Source={x:Static loc:Loc.Instance}}" Width="200">
+              <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                  <StackPanel Orientation="Horizontal">
+                    <Button Content="{Binding [Shares.CopyLink], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnCopyLink" Padding="10,4" Margin="0,0,6,0" />
+                    <Button Content="{Binding [Shares.Open], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnOpenLink" Padding="10,4" Margin="0,0,6,0" />
+                    <Button Content="{Binding [Shares.Revoke], Source={x:Static loc:Loc.Instance}}" Tag="{Binding}" Click="OnRevoke" Padding="10,4" Style="{StaticResource DangerButton}" />
+                  </StackPanel>
+                </DataTemplate>
+              </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+          </GridView>
+        </ListView.View>
+      </ListView>
+    </Border>
 
-    <TextBlock Grid.Row="2" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap"
+    <TextBlock Grid.Row="2" Margin="2,10,0,0" Foreground="{StaticResource TextMuted}" TextWrapping="Wrap"
                Text="{Binding [Shares.Footer], Source={x:Static loc:Loc.Instance}}" />
   </Grid>
 </UserControl>

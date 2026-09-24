@@ -1,113 +1,105 @@
 <UserControl x:Class="NetDisk.App.Views.SpacesView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:NetDisk.App.Views"
              xmlns:loc="clr-namespace:NetDisk.App.Localization">
-  <!--
-    团队空间协作 + 分享创建(DE-D-17;与 H5 同一组接口)。
-
-    两条纪律体现在界面上:
-      1.**按钮不做权限门禁**:所有动作按钮始终可点,被服务端拒绝时把服务端给的
-        原因显示出来(4.3:判权只在服务端)。`is_owner` 只用来显示一行"你是所有者"。
-      2.**解散要手输空间名**(硬删,4.5 无回收站):按钮先把名字填进待确认框,
-        只有输入与空间名完全一致才允许提交 —— 与 H5 的二次确认同款。
-  -->
-  <Grid Margin="12">
+  <!-- 团队空间协作 + 分享创建(DE-D-17)。按钮不做事前权限门禁,被拒时显示服务端原因。 -->
+  <Grid Margin="20">
     <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="260" />
+      <ColumnDefinition Width="300" />
       <ColumnDefinition Width="*" />
     </Grid.ColumnDefinitions>
 
     <!-- 左:空间列表 + 建空间 + 分享 -->
-    <StackPanel Grid.Column="0" Margin="0,0,12,0">
-      <TextBlock FontSize="16" FontWeight="SemiBold"
-                 Text="{Binding [Spaces.Title], Source={x:Static loc:Loc.Instance}}" />
+    <StackPanel Grid.Column="0" Margin="0,0,14,0">
+      <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+        <StackPanel>
+          <TextBlock Style="{StaticResource CardTitle}"
+                     Text="{Binding [Spaces.Title], Source={x:Static loc:Loc.Instance}}" />
+          <TextBlock Margin="0,0,0,10" Foreground="{StaticResource TextSecondary}"
+                     Text="{Binding [Spaces.Subtitle], Source={x:Static loc:Loc.Instance}}" />
+          <ListBox x:Name="SpaceList" Height="180" SelectionChanged="OnSpaceSelected" />
 
-      <TextBlock Margin="0,6,0,0" Foreground="#666"
-                 Text="{Binding [Spaces.Subtitle], Source={x:Static loc:Loc.Instance}}" />
-      <ListBox x:Name="SpaceList" Height="180" Margin="0,4,0,0"
-               SelectionChanged="OnSpaceSelected" />
+          <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+            <TextBox x:Name="NewSpaceName" Width="160" />
+            <Button x:Name="CreateSpaceButton" Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Padding="14,8"
+                    Content="{Binding [Spaces.Create], Source={x:Static loc:Loc.Instance}}" Click="OnCreateSpace" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
 
-      <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-        <TextBox x:Name="NewSpaceName" Width="150" />
-        <Button x:Name="CreateSpaceButton" Margin="6,0,0,0"
-                Content="{Binding [Spaces.Create], Source={x:Static loc:Loc.Instance}}"
-                Click="OnCreateSpace" />
-      </StackPanel>
+      <Border Style="{StaticResource Card}">
+        <StackPanel>
+          <TextBlock Style="{StaticResource CardTitle}"
+                     Text="{Binding [Spaces.CreateShareTitle], Source={x:Static loc:Loc.Instance}}" />
+          <TextBlock Margin="0,0,0,8" Foreground="{StaticResource TextSecondary}"
+                     Text="{Binding [Spaces.ShareFileId], Source={x:Static loc:Loc.Instance}}" />
+          <TextBox x:Name="ShareFileId" Margin="0,0,0,8" />
 
-      <Separator Margin="0,12,0,8" />
-      <TextBlock FontWeight="SemiBold"
-                 Text="{Binding [Spaces.CreateShareTitle], Source={x:Static loc:Loc.Instance}}" />
-      <TextBlock Margin="0,4,0,0" Foreground="#666"
-                 Text="{Binding [Spaces.ShareFileId], Source={x:Static loc:Loc.Instance}}" />
-      <TextBox x:Name="ShareFileId" Margin="0,2,0,0" />
+          <TextBlock Style="{StaticResource SectionLabel}" Text="{Binding [Spaces.ShareExpires], Source={x:Static loc:Loc.Instance}}" />
+          <TextBox x:Name="ShareExpiresHours" Margin="0,0,0,8" Text="24" />
 
-      <TextBlock Margin="0,6,0,0"
-                 Text="{Binding [Spaces.ShareExpires], Source={x:Static loc:Loc.Instance}}" />
-      <TextBox x:Name="ShareExpiresHours" Margin="0,2,0,0" Text="24" />
+          <TextBlock Style="{StaticResource SectionLabel}" Text="{Binding [Spaces.ShareMaxDownloads], Source={x:Static loc:Loc.Instance}}" />
+          <TextBox x:Name="ShareMaxDownloads" Margin="0,0,0,8" />
 
-      <TextBlock Margin="0,6,0,0"
-                 Text="{Binding [Spaces.ShareMaxDownloads], Source={x:Static loc:Loc.Instance}}" />
-      <TextBox x:Name="ShareMaxDownloads" Margin="0,2,0,0" />
+          <TextBlock Style="{StaticResource SectionLabel}" Text="{Binding [Spaces.SharePassword], Source={x:Static loc:Loc.Instance}}" />
+          <TextBox x:Name="SharePassword" Margin="0,0,0,10" />
 
-      <TextBlock Margin="0,6,0,0"
-                 Text="{Binding [Spaces.SharePassword], Source={x:Static loc:Loc.Instance}}" />
-      <TextBox x:Name="SharePassword" Margin="0,2,0,0" />
-
-      <Button x:Name="CreateShareButton" Margin="0,6,0,0"
-              Content="{Binding [Spaces.CreateShare], Source={x:Static loc:Loc.Instance}}"
-              Click="OnCreateShare" />
-      <TextBox x:Name="ShareLink" Margin="0,6,0,0" IsReadOnly="True" TextWrapping="Wrap"
-               Height="48" VerticalScrollBarVisibility="Auto" />
+          <Button x:Name="CreateShareButton" Style="{StaticResource PrimaryButton}" Padding="14,8"
+                  Content="{Binding [Spaces.CreateShare], Source={x:Static loc:Loc.Instance}}" Click="OnCreateShare" />
+          <TextBox x:Name="ShareLink" Margin="0,10,0,0" IsReadOnly="True" TextWrapping="Wrap" Height="48"
+                   VerticalScrollBarVisibility="Auto" />
+        </StackPanel>
+      </Border>
     </StackPanel>
 
     <!-- 右:选中空间的成员与协作动作 -->
-    <StackPanel Grid.Column="1">
-      <TextBlock x:Name="SelectedSpaceTitle" FontSize="16" FontWeight="SemiBold"
-                 Text="{Binding [Spaces.NoSelection], Source={x:Static loc:Loc.Instance}}" />
-      <TextBlock x:Name="SelectedSpaceRole" Margin="0,4,0,0" Foreground="#666" />
+    <Border Grid.Column="1" Style="{StaticResource Card}">
+      <StackPanel>
+        <TextBlock x:Name="SelectedSpaceTitle" FontSize="16" FontWeight="SemiBold"
+                   Text="{Binding [Spaces.NoSelection], Source={x:Static loc:Loc.Instance}}" />
+        <TextBlock x:Name="SelectedSpaceRole" Margin="0,4,0,0" Foreground="{StaticResource TextSecondary}" />
 
-      <TextBlock Margin="0,10,0,0" FontWeight="SemiBold"
-                 Text="{Binding [Spaces.Members], Source={x:Static loc:Loc.Instance}}" />
-      <ListBox x:Name="MemberList" Height="140" Margin="0,4,0,0" />
+        <TextBlock Margin="0,14,0,0" FontWeight="SemiBold"
+                   Text="{Binding [Spaces.Members], Source={x:Static loc:Loc.Instance}}" />
+        <ListBox x:Name="MemberList" Height="140" Margin="0,6,0,0" />
 
-      <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-        <TextBlock Text="{Binding [Spaces.Username], Source={x:Static loc:Loc.Instance}}" VerticalAlignment="Center" />
-        <TextBox x:Name="InviteUsername" Width="120" Margin="6,0,0,0" />
-        <ComboBox x:Name="InvitePermission" Width="100" Margin="6,0,0,0" SelectedIndex="2">
-          <ComboBoxItem Content="manager" />
-          <ComboBoxItem Content="editor" />
-          <ComboBoxItem Content="reader" />
-        </ComboBox>
-        <Button x:Name="InviteButton" Margin="6,0,0,0"
-                Content="{Binding [Spaces.Invite], Source={x:Static loc:Loc.Instance}}" Click="OnInvite" />
-        <Button x:Name="RemoveButton" Margin="6,0,0,0"
-                Content="{Binding [Spaces.RemoveMember], Source={x:Static loc:Loc.Instance}}" Click="OnRemoveMember" />
+        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+          <TextBox x:Name="InviteUsername" Width="120" />
+          <ComboBox x:Name="InvitePermission" Width="100" Margin="8,0,0,0" SelectedIndex="2">
+            <ComboBoxItem Content="manager" />
+            <ComboBoxItem Content="editor" />
+            <ComboBoxItem Content="reader" />
+          </ComboBox>
+          <Button x:Name="InviteButton" Margin="8,0,0,0" Padding="14,8"
+                  Content="{Binding [Spaces.Invite], Source={x:Static loc:Loc.Instance}}" Click="OnInvite" />
+          <Button x:Name="RemoveButton" Margin="8,0,0,0" Padding="14,8"
+                  Content="{Binding [Spaces.RemoveMember], Source={x:Static loc:Loc.Instance}}" Click="OnRemoveMember" />
+        </StackPanel>
+
+        <Separator Margin="0,14,0,12" />
+
+        <StackPanel Orientation="Horizontal">
+          <TextBox x:Name="TransferUsername" Width="120" />
+          <Button x:Name="TransferButton" Margin="8,0,0,0" Padding="14,8"
+                  Content="{Binding [Spaces.Transfer], Source={x:Static loc:Loc.Instance}}" Click="OnTransfer" />
+          <Button x:Name="LeaveButton" Margin="8,0,0,0" Padding="14,8"
+                  Content="{Binding [Spaces.Leave], Source={x:Static loc:Loc.Instance}}" Click="OnLeave" />
+        </StackPanel>
+
+        <Separator Margin="0,14,0,12" />
+
+        <TextBlock FontWeight="SemiBold" Foreground="{StaticResource DangerBrush}"
+                   Text="{Binding [Spaces.Dissolve], Source={x:Static loc:Loc.Instance}}" />
+        <TextBlock Margin="0,4,0,0" Foreground="{StaticResource TextSecondary}"
+                   Text="{Binding [Spaces.DissolveHint], Source={x:Static loc:Loc.Instance}}" />
+        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+          <TextBox x:Name="DissolveConfirmName" Width="180" />
+          <Button x:Name="DissolveButton" Margin="8,0,0,0" Padding="14,8" Style="{StaticResource DangerButton}"
+                  Content="{Binding [Spaces.DissolveConfirm], Source={x:Static loc:Loc.Instance}}" Click="OnDissolve" />
+        </StackPanel>
+
+        <TextBlock x:Name="StatusText" Margin="0,12,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}" />
       </StackPanel>
-
-      <Separator Margin="0,12,0,8" />
-
-      <StackPanel Orientation="Horizontal">
-        <TextBlock Text="{Binding [Spaces.TransferTo], Source={x:Static loc:Loc.Instance}}" VerticalAlignment="Center" />
-        <TextBox x:Name="TransferUsername" Width="120" Margin="6,0,0,0" />
-        <Button x:Name="TransferButton" Margin="6,0,0,0"
-                Content="{Binding [Spaces.Transfer], Source={x:Static loc:Loc.Instance}}" Click="OnTransfer" />
-        <Button x:Name="LeaveButton" Margin="6,0,0,0"
-                Content="{Binding [Spaces.Leave], Source={x:Static loc:Loc.Instance}}" Click="OnLeave" />
-      </StackPanel>
-
-      <Separator Margin="0,12,0,8" />
-      <TextBlock FontWeight="SemiBold" Foreground="#A00"
-                 Text="{Binding [Spaces.Dissolve], Source={x:Static loc:Loc.Instance}}" />
-      <TextBlock Margin="0,4,0,0" Foreground="#666"
-                 Text="{Binding [Spaces.DissolveHint], Source={x:Static loc:Loc.Instance}}" />
-      <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-        <TextBox x:Name="DissolveConfirmName" Width="180" />
-        <Button x:Name="DissolveButton" Margin="6,0,0,0"
-                Content="{Binding [Spaces.DissolveConfirm], Source={x:Static loc:Loc.Instance}}" Click="OnDissolve" />
-      </StackPanel>
-
-      <TextBlock x:Name="StatusText" Margin="0,10,0,0" TextWrapping="Wrap" Foreground="#444" />
-    </StackPanel>
+    </Border>
   </Grid>
 </UserControl>

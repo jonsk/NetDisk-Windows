@@ -6,5 +6,10 @@
        由 App.OnStartup 显式 new MainWindow(见 App.xaml.cs)。 -->
   <Application.Resources>
     <!-- 资源集中在此;MVVM 的 ViewModel 定位见 DE-D-15 首次运行向导 -->
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="Themes/Styles.xaml" />
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
   </Application.Resources>
 </Application>

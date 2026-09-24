@@ -33,6 +33,9 @@ public sealed class SyncRow
     /// <summary>进度列的文字(空 = 此刻没有传输;`42%` = 传到多少了)。</summary>
     public required string ProgressText { get; init; }
 
+    /// <summary>进度数值(0–100,可空;非传输中为 null,界面据此决定是否显示进度条)。</summary>
+    public int? Progress { get; init; }
+
     public required long Version { get; init; }
 
     /// <summary>是否处于「冲突」态(界面据此决定"冲突处理"按钮能不能点)。</summary>
@@ -222,7 +225,8 @@ public partial class SyncView : System.Windows.Controls.UserControl
                 StateText = Describe(s.State),
                 Message = s.Message,
                 Version = s.Version,
-                ProgressText = s.ProgressPercent is { } p ? $"{p:F0}%" : "",
+                Progress = s.ProgressPercent is { } p ? (int?)Math.Round(p) : null,
+                ProgressText = s.ProgressPercent is { } pp ? $"{pp:F0}%" : "",
             });
         }
 

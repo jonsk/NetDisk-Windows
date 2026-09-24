@@ -3,29 +3,30 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:loc="clr-namespace:NetDisk.App.Localization"
         Title="{Binding [SpacePick.Title], Source={x:Static loc:Loc.Instance}}"
-        Height="360" Width="440"
+        Height="380" Width="460"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
-  <!-- 多空间"添加绑定"的第一步:选空间。
-       为什么单独一个窗口而不是在主界面塞一个下拉:可选空间来自服务端(名字可能很长),
-       需要在选之前看清"哪些已经绑过了"——列表能把已绑定项标出来并禁用。 -->
-  <Grid Margin="14">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto" />
-      <RowDefinition Height="*" />
-      <RowDefinition Height="Auto" />
-      <RowDefinition Height="Auto" />
-    </Grid.RowDefinitions>
+  <!-- 多空间"添加绑定"的第一步:选空间(已绑定的会标出并禁用)。 -->
+  <Border Style="{StaticResource Card}" Margin="16">
+    <StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+        <Border Width="34" Height="34" CornerRadius="9" Background="{StaticResource AccentSoftBrush}">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE7EE;" FontSize="17" Foreground="{StaticResource AccentBrush}"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <TextBlock Text="{Binding [SpacePick.Title], Source={x:Static loc:Loc.Instance}}" FontSize="16" FontWeight="SemiBold"
+                   Margin="12,0,0,0" VerticalAlignment="Center" />
+      </StackPanel>
 
-    <TextBlock Grid.Row="0" TextWrapping="Wrap"
-               Text="{Binding [SpacePick.Hint], Source={x:Static loc:Loc.Instance}}" />
-    <ListBox x:Name="List" Grid.Row="1" Margin="0,8,0,0" FontSize="13" />
-    <TextBlock x:Name="HintText" Grid.Row="2" Margin="0,8,0,0" Foreground="#888" TextWrapping="Wrap" />
+      <TextBlock TextWrapping="Wrap" Text="{Binding [SpacePick.Hint], Source={x:Static loc:Loc.Instance}}" />
+      <ListBox x:Name="List" Margin="0,10,0,0" FontSize="13" Height="180" />
+      <TextBlock x:Name="HintText" Margin="0,8,0,0" Foreground="{StaticResource TextMuted}" TextWrapping="Wrap" />
 
-    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-      <Button x:Name="OkButton" Padding="18,6" FontWeight="SemiBold"
-              Content="{Binding [SpacePick.Next], Source={x:Static loc:Loc.Instance}}" Click="OnOk" />
-      <Button Margin="8,0,0,0" Padding="18,6"
-              Content="{Binding [SpacePick.Cancel], Source={x:Static loc:Loc.Instance}}" Click="OnCancel" />
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+        <Button x:Name="OkButton" Style="{StaticResource PrimaryButton}" Padding="20,8" FontWeight="SemiBold"
+                Content="{Binding [SpacePick.Next], Source={x:Static loc:Loc.Instance}}" Click="OnOk" />
+        <Button Margin="8,0,0,0" Padding="20,8"
+                Content="{Binding [SpacePick.Cancel], Source={x:Static loc:Loc.Instance}}" Click="OnCancel" />
+      </StackPanel>
     </StackPanel>
-  </Grid>
+  </Border>
 </Window>

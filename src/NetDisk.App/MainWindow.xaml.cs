@@ -33,8 +33,12 @@ public partial class MainWindow : Window
         _tray = tray;
         InitializeComponent();
         Loaded += OnLoaded;
-        VersionText.Text = Loc.F("Main.VersionFormat", typeof(MainWindow).Assembly.GetName().Version);
+        var versionText = Loc.F("Main.VersionFormat", typeof(MainWindow).Assembly.GetName().Version);
+        VersionText.Text = versionText;
+        SidebarVersion.Text = versionText;
         WireTray();
+        _navReady = true;
+        ShowSection(0); // 所有 x:Name 已就绪,安全设置初始可见分区
     }
 
     /// <summary>
@@ -120,6 +124,13 @@ public partial class MainWindow : Window
     }
 
     private bool _trayHintShown;
+
+    /// <summary>
+    /// 导航切换守卫:XAML 在 <c>InitializeComponent</c> 解析 <c>NavList</c> 的 EndInit 阶段会触发一次
+    /// SelectionChanged(默认选中第 0 项),而此刻右侧内容视图的 x:Name 字段尚未赋值(null)。
+    /// 在 InitializeComponent 完成后再置 true,避免初始化期误触 ShowSection 对 null 解引用。
+    /// </summary>
+    private bool _navReady;
 
     /// <summary>
     /// 「检查更新」:让用户选一个**新版本程序**(NetDisk.App.exe),然后按契约顺序升级。
@@ -280,8 +291,30 @@ public partial class MainWindow : Window
 
     private void ShowLogin()
     {
-        Tabs.Visibility = Visibility.Collapsed;
+        Shell.Visibility = Visibility.Collapsed;
         Login.Visibility = Visibility.Visible;
+    }
+
+    private void OnNavSelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (!_navReady)
+        {
+            return;
+        }
+        if (NavList.SelectedIndex >= 0)
+        {
+            ShowSection(NavList.SelectedIndex);
+        }
+    }
+
+    /// <summary>按导航序号切换右侧内容区(六个视图叠放,只让一个可见)。</summary>
+    private void ShowSection(int index)
+    {
+        var sections = new System.Windows.FrameworkElement[] { Sync, Remote, Spaces, MyShares, Settings, About };
+        for (var i = 0; i < sections.Length; i++)
+        {
+            sections[i].Visibility = i == index ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     private void OnSignedIn(SyncRuntime runtime) => Attach(runtime);
@@ -309,8 +342,9 @@ public partial class MainWindow : Window
         AppLog.Write("app", $"已接入同步(空间={runtime.Config.SpaceId} 根={runtime.Config.SyncRoot})");
 
         Login.Visibility = Visibility.Collapsed;
-        Tabs.Visibility = Visibility.Visible;
-        Tabs.SelectedIndex = 0;
+        Shell.Visibility = Visibility.Visible;
+        NavList.SelectedIndex = 0;
+        ShowSection(0);
     }
 
     /// <summary>

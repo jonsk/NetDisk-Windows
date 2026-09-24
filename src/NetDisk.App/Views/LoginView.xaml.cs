@@ -58,11 +58,30 @@ public partial class LoginView : System.Windows.Controls.UserControl
         }
     }
 
+    /// <summary>在 PasswordBox 与明文 TextBox 之间切换,方便核对输入的口令。</summary>
+    private void OnTogglePassword(object sender, RoutedEventArgs e)
+    {
+        if (PassBox.Visibility == Visibility.Visible)
+        {
+            PassTextBox.Text = PassBox.Password;
+            PassBox.Visibility = Visibility.Collapsed;
+            PassTextBox.Visibility = Visibility.Visible;
+            PassTextBox.Focus();
+        }
+        else
+        {
+            PassBox.Password = PassTextBox.Text;
+            PassTextBox.Visibility = Visibility.Collapsed;
+            PassBox.Visibility = Visibility.Visible;
+            PassBox.Focus();
+        }
+    }
+
     private async void OnLogin(object sender, RoutedEventArgs e)
     {
         var baseUrl = ServerBox.Text.Trim().TrimEnd('/');
         var user = UserBox.Text.Trim();
-        var pass = PassBox.Password;
+        var pass = PassBox.Visibility == Visibility.Visible ? PassBox.Password : PassTextBox.Text;
         var root = RootBox.Text.Trim();
 
         if (baseUrl.Length == 0 || user.Length == 0 || pass.Length == 0 || root.Length == 0)
@@ -148,6 +167,7 @@ public partial class LoginView : System.Windows.Controls.UserControl
             }
 
             PassBox.Clear();
+            PassTextBox.Clear();
             SignedIn?.Invoke(runtime);
         }
         catch (Exception ex)
