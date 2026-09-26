@@ -8,6 +8,10 @@ artifacts/
 # ---- 打包产物(单文件发布,根目录 publish 由脚本/CI 生成)----
 publish/
 publish-verify/
+publish-self/
+
+# ---- 发布包(zip 成品,不应入版本库)----
+NetDisk.App-*.zip
 
 # ---- 运行时数据 ----
 data/
