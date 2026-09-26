@@ -599,18 +599,30 @@ paths:
   /api/v1/admin/departments:
     get:
       tags: [admin]
-      summary: 部门树(闭包表)
+      summary: 全部部门(扁平列表)
+      description: |
+        deprecated: true
+        管理后台前端请使用 /api/v1/admin/departments/children 懒加载。
+        本端点仅为兼容保留(8000+ 节点一次拉全量会导致前端 n-tree 卡死);
+        将来 IAM 同步引擎接入后使用,随后可删。
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/DepartmentNode" }
+                type: object
+                properties:
+                  departments:
+                    type: array
+                    items: { $ref: "#/components/schemas/DepartmentNode" }
+                  total: { type: integer }
     post:
       tags: [admin]
-      summary: 新建部门
+      summary: 新建部门/机构(根节点)
+      description: |
+        parent_id 为空时创建机构根节点。**禁止创建第二个根**:已存在根时返回 409。
+        顶层机构请在某个子节点下新建(parent_id 指向该子节点)。
       requestBody:
         required: true
         content:
@@ -621,17 +633,94 @@ paths:
               properties:
                 name: { type: string }
                 parent_id: { type: string }
+                sort_order: { type: integer }
       responses:
         "201": { description: OK }
+        "409":
+          description: 已存在根节点 / 同源同 ext_id 已存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/departments/children:
+    get:
+      tags: [admin]
+      summary: 某节点的直接子部门(一层,懒加载)
+      description: |
+        parent_id 为空时返回机构根节点。仅返回直接子部门,不递归。
+        响应含 has_children(前端据此显示/隐藏展开箭头)。
+        total = 当前层本页返回数(单层 >500 时反映本页数而非真实总数)。
+      parameters:
+        - { name: parent_id, in: query, required: false, schema: { type: string }, description: 空=返回根节点 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  departments:
+                    type: array
+                    items: { $ref: "#/components/schemas/DepartmentNode" }
+                  total: { type: integer }
 
   /api/v1/admin/departments/{id}:
     delete:
       tags: [admin]
-      summary: 删除部门
+      summary: 删除机构(拒绝式:前置校验)
+      description: |
+        有子部门或有直属人员时返回 409(管理员先清空再删),非级联。
+        根节点始终拒绝("机构根节点不可删除,只能改名")。
+        删除前可先调 GET /api/v1/admin/departments/{id}/delete-check 预检。
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: OK }
+        "409":
+          description: 有子部门 / 有直属人员 / 是根节点
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    put:
+      tags: [admin]
+      summary: 改名机构/部门(PUT 整字段替换)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DepartmentRenameRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepartmentNode" }
+        "404":
+          description: 机构不存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/departments/{id}/delete-check:
+    get:
+      tags: [admin]
+      summary: 删除前预检(返回能否删除 + 阻断原因计数)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  can_delete: { type: boolean }
+                  child_count: { type: integer }
+                  user_count: { type: integer }
 
   /api/v1/spaces:
     get:
@@ -808,6 +897,184 @@ paths:
                 frozen: { type: boolean }
       responses:
         "200": { description: OK }
+
+  /api/v1/admin/users:
+    get:
+      tags: [admin]
+      summary: 管理员列出用户(支持按机构筛选)
+      parameters:
+        - { name: search, in: query, required: false, schema: { type: string } }
+        - { name: role, in: query, required: false, schema: { type: string } }
+        - { name: status, in: query, required: false, schema: { type: string } }
+        - { name: department_id, in: query, required: false, schema: { type: string }, description: 空=不过滤(全局) }
+        - { name: include_subtree, in: query, required: false, schema: { type: boolean }, description: 缺省/非法值一律 true;仅显式 false/0 为 false。true=含该机构子树下用户,false=仅本部门直属 }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+        - { name: offset, in: query, required: false, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserListResult" }
+    post:
+      tags: [admin]
+      summary: 管理员创建用户(服务端生成凭据并建个人空间,不含密码)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminUserCreateRequest" }
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserView" }
+        "400":
+          description: 非法参数(用户名为空/角色不合法)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: 用户名或邮箱冲突
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/users/{id}:
+    patch:
+      tags: [admin]
+      summary: 管理员更新用户(角色/状态)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminUserUpdateRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserView" }
+        "400":
+          description: 非法参数(角色/状态不合法或无修改字段)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: 用户不存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/users/{id}/departments:
+    get:
+      tags: [admin]
+      summary: 获取用户所属部门与主部门
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserDepartmentsResult" }
+        "404":
+          description: 用户不存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    put:
+      tags: [admin]
+      summary: 覆盖式设置用户所属部门与主部门
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminUserDepartmentsRequest" }
+      responses:
+        "200":
+          description: OK(回显设置后的结果)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserDepartmentsResult" }
+        "400":
+          description: 非法参数(部门列表为空 / 主部门不在列表中)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: 用户或部门不存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/spaces:
+    get:
+      tags: [admin]
+      summary: 管理员列出全部空间
+      parameters:
+        - { name: search, in: query, required: false, schema: { type: string } }
+        - { name: kind, in: query, required: false, schema: { type: string } }
+        - { name: frozen, in: query, required: false, schema: { type: boolean } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+        - { name: offset, in: query, required: false, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminSpaceListResult" }
+
+  /api/v1/admin/spaces/{id}/quota:
+    patch:
+      tags: [admin]
+      summary: 管理员设置空间配额与预警阈值
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpaceQuotaRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceQuotaResult" }
+        "400":
+          description: 非法参数(配额<0 / 预警越界 / 无修改字段)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: 空间不存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/spaces/{id}/revoke:
+    post:
+      tags: [admin]
+      summary: 管理员收回空间(冻结并清空成员;文件不删)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceRevokeResult" }
+        "404":
+          description: 空间不存在
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
 components:
   securitySchemes:
@@ -1248,49 +1515,144 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        parent_id: { type: string }
+        parent_id: { type: string, nullable: true, description: 根节点为空串 "" }
+        sort_order: { type: integer }
+        source: { type: string, description: 部门来源(manual/wecom/dingtalk/ldap/oidc-scim/keycloak/casdoor/zhuyun) }
+        ext_id: { type: string, nullable: true, description: 外部身份源中的部门 id }
+        is_root: { type: boolean, description: 是否为根节点(机构) }
+        has_children: { type: boolean, description: 是否还有子部门(懒加载据此显示展开箭头) }
         children:
           type: array
+          description: 仅历史兼容/可选,新设计下任何端点都不填充;前端勿据此递归渲染
           items: { $ref: "#/components/schemas/DepartmentNode" }
 
-    AuditLogRow:
+    DepartmentRenameRequest:
       type: object
-      required: [id, at, action, result, bytes, duration_ms]
+      required: [name]
+      properties:
+        name: { type: string, description: 新名称(部门唯一可改字段) }
+
+    # ---- 管理员治理:用户与空间(4.3 / FE-W-04 / FE-W-06)----
+
+    AdminUserView:
+      type: object
+      required: [id, username, display_name, role, status]
       properties:
         id: { type: string }
-        at: { type: string }
-        user_id: { type: string }
-        space_id: { type: string }
-        action: { type: string }
-        target_type: { type: string }
-        target_id: { type: string }
-        result:
-          type: string
-          description: 结果分类(空串 = 成功);写入时定下,不由业务码反推
-        result_code: { type: string }
-        ip: { type: string }
-        user_agent: { type: string }
-        request_id: { type: string, description: 能定位到具体那次请求(R-23) }
-        bytes: { type: integer, format: int64 }
-        duration_ms: { type: integer }
-        share_token: { type: string }
+        username: { type: string }
+        display_name: { type: string }
+        avatar_url: { type: string }
+        role: { type: string, description: super_admin / dept_admin / user }
+        status: { type: string, description: active / disabled / pending }
+        email: { type: string }
+        phone: { type: string, nullable: true, description: "手机号(00015 新增;可空)" }
+        token_version: { type: integer, format: int64 }
+        created_at: { type: string }
+        updated_at: { type: string }
+        last_login_at: { type: string, nullable: true }
 
-    AuditLogPage:
+    AdminUserListResult:
       type: object
-      required: [items, count, from, to, limit, truncated]
+      required: [users, total, limit, offset]
       properties:
-        items:
+        users:
           type: array
-          items: { $ref: "#/components/schemas/AuditLogRow" }
-        count: { type: integer }
-        from: { type: string, description: 真正生效的起始时间(未传时是 now-7d) }
-        to: { type: string }
+          items: { $ref: "#/components/schemas/AdminUserView" }
+        total: { type: integer }
         limit: { type: integer }
-        truncated:
-          type: boolean
-          description: 结果数达到 limit 时为 true —— 说明还有更多,不是"就这些"
-        next_before: { type: string, description: keyset 游标:原样回传取下一页 }
-        next_before_id: { type: string }
+        offset: { type: integer }
+
+    AdminUserCreateRequest:
+      type: object
+      required: [username]
+      properties:
+        username: { type: string }
+        email: { type: string }
+        display_name: { type: string }
+        role: { type: string, description: super_admin / dept_admin / user;缺省 user }
+        phone: { type: string, nullable: true, description: "手机号;可空" }
+
+    AdminUserUpdateRequest:
+      type: object
+      properties:
+        role: { type: string, nullable: true, description: super_admin / dept_admin / user }
+        status: { type: string, nullable: true, description: active / disabled / pending }
+        phone: { type: string, nullable: true, description: "手机号;传空串=清空,nil=不改" }
+
+    AdminUserDepartmentsRequest:
+      type: object
+      required: [department_ids]
+      properties:
+        department_ids:
+          type: array
+          items: { type: string }
+          description: 用户所属部门 id 列表(覆盖式:不在列表中的旧关联会被清除)
+        primary_department_id:
+          type: string
+          description: 主部门 id(必须在 department_ids 中;空=不设主部门)
+
+    AdminUserDepartmentsResult:
+      type: object
+      required: [departments, primary_department_id]
+      properties:
+        departments:
+          type: array
+          items: { $ref: "#/components/schemas/DepartmentNode" }
+        primary_department_id:
+          type: string
+          nullable: true
+
+    AdminSpaceView:
+      type: object
+      required: [id, kind, name, owner_id, quota_bytes, used_bytes, frozen]
+      properties:
+        id: { type: string }
+        kind: { type: string, description: personal / team }
+        name: { type: string }
+        owner_id: { type: string }
+        owner_username: { type: string }
+        owner_display_name: { type: string }
+        quota_bytes: { type: integer, format: int64 }
+        used_bytes: { type: integer, format: int64 }
+        warn_percent: { type: integer }
+        used_percent: { type: number, format: double }
+        frozen: { type: boolean }
+        member_count: { type: integer }
+        files_count: { type: integer, format: int64 }
+        created_at: { type: string }
+
+    AdminSpaceListResult:
+      type: object
+      required: [spaces, total]
+      properties:
+        spaces:
+          type: array
+          items: { $ref: "#/components/schemas/AdminSpaceView" }
+        total: { type: integer }
+
+    SpaceQuotaRequest:
+      type: object
+      properties:
+        quota_bytes: { type: integer, format: int64, nullable: true, description: 字节;0=不限制;<0 拒绝 }
+        warn_percent: { type: integer, nullable: true, description: 1..100 }
+
+    SpaceQuotaResult:
+      type: object
+      required: [id, quota_bytes, used_bytes, warn_percent]
+      properties:
+        id: { type: string }
+        quota_bytes: { type: integer, format: int64 }
+        used_bytes: { type: integer, format: int64 }
+        warn_percent: { type: integer }
+
+    SpaceRevokeResult:
+      type: object
+      required: [id, frozen, members_removed]
+      properties:
+        id: { type: string }
+        frozen: { type: boolean }
+        members_removed: { type: integer }
+        note: { type: string, description: 已收回访问权(冻结并清空成员);空间内文件未删除 }
 
 security:
   - bearerAuth: []
