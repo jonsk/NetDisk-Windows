@@ -132,24 +132,61 @@ public sealed class SyncRuntime : IAsyncDisposable
         var api = BuildApi(config, session);
         var files = new FileApi(api);
 
-        // 解析要同步的空间:配置里指定了就用它,否则挑个人空间。
-        // 用户看不见空间的 uuid,让他在登录页手填是不可用的 —— 这里替他定下来。
-        if (string.IsNullOrWhiteSpace(config.SpaceId))
+        // 校准要同步的空间:本地缓存的 space_id / spaces 可能已失效——换账号、
+        // 空间被解散/移出、或服务端清空重建导致 uuid 变化。旧逻辑"非空即沿用"会让
+        // 客户端拿着无权访问的 id 去拉文件,直接 403 space_revoked(表现为登录后立刻弹
+        // "你没有该空间的访问权限")。所以这里**总是**拉一次可见空间并按可见集合校正缓存,
+        // 最后才回落到个人空间。用户看不见空间的 uuid,让他在登录页手填是不可用的。
+        var visible = await files.ListSpacesAsync(ct).ConfigureAwait(false);
+        ResolveSpaceBindings(config, visible);
+
+        config.LastLogin = user;
+        config.Save();
+
+        return BuildRuntime(config, session, api);
+    }
+
+    /// <summary>
+    /// 按服务端**可见空间集合**校正本地绑定(登录后调用)。
+    ///
+    /// 规则:
+    ///   ① 多空间绑定(<c>spaces</c>):剔除"已不可见或没配同步目录"的项;
+    ///   ② 主空间(legacy 三件套):<c>space_id</c> 不可见则清空,退回重新解析;
+    ///   ③ 校正后仍无可用空间 → 落到个人空间(没有则明确报错)。
+    ///
+    /// 这样换账号 / 空间被移出 / 服务端重建(uuid 变化)后,客户端不会再拿着旧 id 去撞 403。
+    /// </summary>
+    private static void ResolveSpaceBindings(ClientConfig config, SpaceList visible)
+    {
+        var visibleIds = new HashSet<string>(
+            visible.spaces.Select(s => s.id), StringComparer.OrdinalIgnoreCase);
+
+        // ① 多空间绑定:只保留仍然可见且配了同步目录的
+        if (config.Spaces.Count > 0)
         {
-            var spaces = await files.ListSpacesAsync(ct).ConfigureAwait(false);
-            var personal = spaces.spaces?.FirstOrDefault(s => s.kind == "personal")
-                           ?? spaces.spaces?.FirstOrDefault();
+            config.Spaces = config.Spaces
+                .Where(b => !string.IsNullOrWhiteSpace(b.SyncRoot) && visibleIds.Contains(b.SpaceId))
+                .ToList();
+        }
+
+        // ② 主空间:不可见则清空,避免沿用失效 id
+        if (!string.IsNullOrWhiteSpace(config.SpaceId) && !visibleIds.Contains(config.SpaceId))
+        {
+            config.SpaceId = "";
+            config.ParentId = "";
+        }
+
+        // ③ 仍无空间可用 → 个人空间(用户看不见 uuid,替他定下来)
+        if (config.Spaces.Count == 0 && string.IsNullOrWhiteSpace(config.SpaceId))
+        {
+            var personal = visible.spaces.FirstOrDefault(s => s.kind == "personal")
+                           ?? visible.spaces.FirstOrDefault();
             if (personal is null)
             {
                 throw new InvalidOperationException("这个账号没有任何可见空间,无法同步");
             }
             config.SpaceId = personal.id;
         }
-
-        config.LastLogin = user;
-        config.Save();
-
-        return BuildRuntime(config, session, api);
     }
 
     /// <summary>
