@@ -41,7 +41,38 @@ public partial class LoginView : System.Windows.Controls.UserControl
             ? System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "NetDisk")
             : cfg.SyncRoot;
+
+        // 语言切换:登录前也能切换语言(与设置页共用同一套 i18n;登录文案全是绑定,切换即时刷新)。
+        LanguageCombo.ItemsSource = Locale.Languages.Select(l => l.SelfName).ToList();
+        LanguageCombo.SelectedIndex = GetLanguageIndex(Loc.Current);
+
         PassBox.Focus();
+    }
+
+    private static int GetLanguageIndex(string code) =>
+        string.Equals(code, "en", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+
+    /// <summary>登录页语言切换:立即生效(免重启)+ 写回 client.json 持久化。</summary>
+    private void OnLanguageChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (LanguageCombo.SelectedIndex < 0)
+        {
+            return;
+        }
+        var code = LanguageCombo.SelectedIndex switch
+        {
+            1 => "en",
+            _ => "zh",
+        };
+        if (string.Equals(code, Loc.Current, StringComparison.Ordinal))
+        {
+            return;
+        }
+        Loc.Instance.Code = code;      // 即时全局刷新(空串通知 = 所有绑定重算)
+        var cfg = ClientConfig.Load(); // 登录页还没有 SyncRuntime,直接读写配置持久化
+        cfg.Language = code;
+        cfg.Save();
+        AppLog.Write("app", $"界面语言已切换:{code}");
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)

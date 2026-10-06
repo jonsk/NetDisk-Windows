@@ -7,19 +7,27 @@
   <Grid Background="{StaticResource AppBg}">
     <Border Style="{StaticResource Card}" Width="468" VerticalAlignment="Center" HorizontalAlignment="Center">
       <StackPanel>
-        <!-- 头部 -->
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-          <Border Width="42" Height="42" CornerRadius="11" Background="{StaticResource AccentBrush}">
-            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE753;" FontSize="21"
-                       Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
-          </Border>
-          <StackPanel Margin="13,0,0,0" VerticalAlignment="Center">
-            <TextBlock FontSize="20" FontWeight="SemiBold"
-                       Text="{Binding [Login.Title], Source={x:Static loc:Loc.Instance}}" />
-            <TextBlock Margin="0,3,0,0" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap"
-                       Text="{Binding [Login.Subtitle], Source={x:Static loc:Loc.Instance}}" />
+        <!-- 头部:品牌 + 语言切换(登录前即可切换,免重启;与设置页共用一套 i18n) -->
+        <Grid Margin="0,0,0,4">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" Orientation="Horizontal">
+            <Border Width="42" Height="42" CornerRadius="11" Background="{StaticResource AccentBrush}">
+              <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE753;" FontSize="21"
+                         Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <StackPanel Margin="13,0,0,0" VerticalAlignment="Center">
+              <TextBlock FontSize="20" FontWeight="SemiBold"
+                         Text="{Binding [Login.Title], Source={x:Static loc:Loc.Instance}}" />
+              <TextBlock Margin="0,3,0,0" Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap"
+                         Text="{Binding [Login.Subtitle], Source={x:Static loc:Loc.Instance}}" />
+            </StackPanel>
           </StackPanel>
-        </StackPanel>
+          <ComboBox x:Name="LanguageCombo" Grid.Column="1" Width="118" VerticalAlignment="Top"
+                    SelectionChanged="OnLanguageChanged" />
+        </Grid>
 
         <!-- 字段 -->
         <StackPanel Margin="0,20,0,0">
