@@ -47,11 +47,7 @@ public partial class MySharesView : System.Windows.Controls.UserControl
 
     private static SpaceCollabClient? TryCreateClient()
     {
-        var baseUrl = NetDisk.SyncEngine.Host.ClientConfig.Load().BaseUrl;
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            baseUrl = Environment.GetEnvironmentVariable("NETDISK_BASE_URL");
-        }
+        var baseUrl = ShareLinkBase.Resolve();
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
             return null;
@@ -60,15 +56,8 @@ public partial class MySharesView : System.Windows.Controls.UserControl
         return new SpaceCollabClient(api);
     }
 
-    private static string CurrentBaseUrl()
-    {
-        var baseUrl = NetDisk.SyncEngine.Host.ClientConfig.Load().BaseUrl;
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            baseUrl = Environment.GetEnvironmentVariable("NETDISK_BASE_URL");
-        }
-        return baseUrl ?? "";
-    }
+    // 基址解析集中在 ShareLinkBase(配置优先、环境变量兜底),此处只做转发。
+    private static string CurrentBaseUrl() => ShareLinkBase.Resolve();
 
     private void Status(string text) => StatusText.Text = text;
 

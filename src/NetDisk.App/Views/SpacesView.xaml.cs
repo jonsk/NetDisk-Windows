@@ -52,11 +52,7 @@ public partial class SpacesView : System.Windows.Controls.UserControl
     /// </summary>
     private static SpaceCollabClient? TryCreateClient()
     {
-        var baseUrl = NetDisk.SyncEngine.Host.ClientConfig.Load().BaseUrl;
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            baseUrl = Environment.GetEnvironmentVariable("NETDISK_BASE_URL");
-        }
+        var baseUrl = ShareLinkBase.Resolve();
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
             return null;
@@ -277,8 +273,9 @@ public partial class SpacesView : System.Windows.Controls.UserControl
                 ExpiresInHours = hours,
                 MaxDownloads = maxDownloads,
             });
-            var baseUrl = Environment.GetEnvironmentVariable("NETDISK_BASE_URL") ?? "";
-            ShareLink.Text = ShareLinks.LinkFor(created, baseUrl);
+            // 基址解析集中在 ShareLinkBase(配置优先、环境变量兜底);
+            // 此前这里只读环境变量,忽略了用户在设置页填的地址 → 分享链接缺主机名。
+            ShareLink.Text = ShareLinks.LinkFor(created, ShareLinkBase.Resolve());
 
             // 把服务端回显的约束原样告诉用户(免得"建完不知道限制有没有生效")
             var info = new System.Text.StringBuilder();
